@@ -72,8 +72,21 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Check optional release signing secrets
+        id: release_signing
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ] && [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_PASSWORD" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build Signed Release APK & AAB (Optional)
-        if: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' && secrets.STORE_PASSWORD != '' && secrets.KEY_PASSWORD != '' }}
+        if: steps.release_signing.outputs.enabled == 'true'
         env:
           KEYSTORE_PATH: ${{ runner.temp }}/upload-keystore.jks
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
@@ -85,7 +98,7 @@ jobs:
           gradle :app:assembleRelease :app:bundleRelease --no-daemon --stacktrace
 
       - name: Upload Release APK & AAB artifacts (Optional)
-        if: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' && secrets.STORE_PASSWORD != '' && secrets.KEY_PASSWORD != '' }}
+        if: steps.release_signing.outputs.enabled == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ReelForge-release-outputs
