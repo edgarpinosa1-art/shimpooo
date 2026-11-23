@@ -1,0 +1,6 @@
+{
+  "name": "ReelForge",
+  "description": "Download watermark-free videos from TikTok, Facebook, and Instagram and reverse-engineer any video into AI ingredient image prompts and master video prompts using your Gemini API key.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

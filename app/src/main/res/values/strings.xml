@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ReelForge</string>
+    <string name="nav_downloader">Downloader</string>
+    <string name="nav_prompt_studio">Prompt AI</string>
+    <string name="nav_vault">Vault</string>
+
+    <string name="downloader_headline">No-Watermark Video Downloader</string>
+    <string name="downloader_subtitle">Paste any TikTok, Facebook, or Instagram video link to extract clean HD MP4 without watermarks.</string>
+    <string name="url_input_label">Video URL</string>
+    <string name="url_input_placeholder">https://www.tiktok.com/... or facebook.com/reel/...</string>
+    <string name="btn_paste">Paste</string>
+    <string name="btn_clear">Clear</string>
+    <string name="btn_fetch_video">Extract Video</string>
+    <string name="btn_download_mp4">Save HD No-Watermark</string>
+    <string name="btn_send_to_prompt">Extract AI Prompt</string>
+    <string name="btn_share_video">Share</string>
+    <string name="btn_open_player">Preview</string>
+
+    <string name="studio_headline">Gemini Video-to-Prompt Studio</string>
+    <string name="studio_subtitle">Upload any video and reverse-engineer ingredient image prompts plus a 100% enhanced AI video prompt.</string>
+    <string name="api_key_missing_title">Gemini API Key Required</string>
+    <string name="api_key_missing_desc">Enter your Gemini API key from Google AI Studio to analyze full videos and extract prompts.</string>
+    <string name="api_key_configured">Gemini Key Active</string>
+    <string name="btn_manage_key">API Key</string>
+    <string name="btn_pick_video">Pick Video from Device</string>
+    <string name="btn_analyze_video">Extract Ingredients &amp; Video Prompt</string>
+
+    <string name="vault_headline">Saved Vault &amp; Settings</string>
+    <string name="vault_empty_title">Your Studio Vault is Empty</string>
+    <string name="vault_empty_desc">Downloaded watermark-free clips and extracted AI prompts will appear here automatically.</string>
+
+    <string name="error_invalid_url">Please enter a valid TikTok, Facebook, or Instagram video URL.</string>
+    <string name="error_no_api_key">Please add your Gemini API key first before analyzing a video.</string>
+    <string name="copied_to_clipboard">Copied to clipboard</string>
+</resources>
