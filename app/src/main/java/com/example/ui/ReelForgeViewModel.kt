@@ -4,22 +4,31 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.dubbing.DubbingJobCoordinator
 import com.example.data.local.AppDatabase
 import com.example.data.local.DownloadedClipEntity
 import com.example.data.local.PromptBlueprintEntity
 import com.example.data.local.SettingsDataStore
 import com.example.data.local.UserSettings
 import com.example.data.local.VaultRepository
+import com.example.data.local.VideoTranscriptEntity
 import com.example.data.model.DownloadedVideoResult
+import com.example.data.model.DubAudioDuckingMode
+import com.example.data.model.DubSourceLanguage
+import com.example.data.model.DubVoiceEngine
 import com.example.data.model.ExtractedVideoInfo
 import com.example.data.model.LocalVideoInspection
+import com.example.data.model.MmsModelStatus
 import com.example.data.model.PromptBlueprint
 import com.example.data.model.PromptUpgradePreset
 import com.example.data.model.SocialPlatform
 import com.example.data.model.TargetVideoGenerator
+import com.example.data.model.TranscriptLanguageMode
 import com.example.data.model.VideoAspectRatio
+import com.example.data.model.VideoTranscript
 import com.example.data.network.GeminiVideoAnalyzerRepository
 import com.example.data.network.PromptBlueprintSerializer
+import com.example.data.network.TranscriptSerializer
 import com.example.data.network.VideoExtractorRepository
 import com.example.data.network.VideoFrameExtractor
 import kotlinx.coroutines.CancellationException
@@ -56,6 +65,14 @@ sealed interface StudioAnalysisUiState {
     data class Error(val message: String) : StudioAnalysisUiState
 }
 
+sealed interface TranscriptUiState {
+    data object Idle : TranscriptUiState
+    data object InspectingVideo : TranscriptUiState
+    data class Transcribing(val stage: String) : TranscriptUiState
+    data class Success(val transcript: VideoTranscript) : TranscriptUiState
+    data class Error(val message: String) : TranscriptUiState
+}
+
 sealed interface ApiKeyCheckState {
     data object Idle : ApiKeyCheckState
     data object Verifying : ApiKeyCheckState
@@ -73,6 +90,7 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
     private val videoExtractor = VideoExtractorRepository(application)
     private val frameExtractor = VideoFrameExtractor(application)
     private val geminiAnalyzer = GeminiVideoAnalyzerRepository(application)
+    private val dubbingCoordinator = DubbingJobCoordinator.getInstance(application)
 
     val userSettings: StateFlow<UserSettings> = settingsStore.settingsFlow
         .stateIn(
@@ -89,6 +107,13 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
         )
 
     val promptBlueprints: StateFlow<List<PromptBlueprintEntity>> = vaultRepository.promptBlueprints
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = emptyList()
+        )
+
+    val videoTranscripts: StateFlow<List<VideoTranscriptEntity>> = vaultRepository.videoTranscripts
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5_000),
@@ -119,8 +144,20 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
     private val _studioState = MutableStateFlow<StudioAnalysisUiState>(StudioAnalysisUiState.Idle)
     val studioState: StateFlow<StudioAnalysisUiState> = _studioState.asStateFlow()
 
+    private val _transcriptLanguageMode = MutableStateFlow(TranscriptLanguageMode.ORIGINAL_VERBATIM)
+    val transcriptLanguageMode: StateFlow<TranscriptLanguageMode> = _transcriptLanguageMode.asStateFlow()
+
+    private val _transcriptState = MutableStateFlow<TranscriptUiState>(TranscriptUiState.Idle)
+    val transcriptState: StateFlow<TranscriptUiState> = _transcriptState.asStateFlow()
+
     private val _apiKeyCheckState = MutableStateFlow<ApiKeyCheckState>(ApiKeyCheckState.Idle)
     val apiKeyCheckState: StateFlow<ApiKeyCheckState> = _apiKeyCheckState.asStateFlow()
+
+    val dubberState: StateFlow<DubberPanelState> = dubbingCoordinator.state
+
+    init {
+        dubbingCoordinator.refreshEnvironment()
+    }
 
     // =========================================================================
     // DOWNLOADER ACTIONS
@@ -146,7 +183,7 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
         val raw = _urlInput.value.trim()
         if (raw.isEmpty()) {
             _downloaderState.value = DownloaderUiState.Error(
-                "Mag-paste muna ng TikTok, Facebook, o Instagram video URL."
+                "Mag-paste muna ng TikTok, Facebook, Instagram, YouTube, o Pinterest video URL."
             )
             return
         }
@@ -233,16 +270,18 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
     fun onLocalVideoSelected(uri: Uri) {
         viewModelScope.launch {
             _studioState.value = StudioAnalysisUiState.InspectingVideo
+            _transcriptState.value = TranscriptUiState.InspectingVideo
             try {
                 val inspection = frameExtractor.inspectVideo(uri)
                 _selectedVideo.value = inspection
                 _studioState.value = StudioAnalysisUiState.Idle
+                _transcriptState.value = TranscriptUiState.Idle
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _studioState.value = StudioAnalysisUiState.Error(
-                    "Hindi mabasa ang video: ${e.localizedMessage ?: "Unsupported format"}"
-                )
+                val msg = "Hindi mabasa ang video: ${e.localizedMessage ?: "Unsupported format"}"
+                _studioState.value = StudioAnalysisUiState.Error(msg)
+                _transcriptState.value = TranscriptUiState.Error(msg)
             }
         }
     }
@@ -278,7 +317,7 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             val count = frameExtractor.saveKeyframesToGallery(frames)
             onComplete(
-                if (count > 0) "Saved $count keyframes to Pictures/ReelForge!"
+                if (count > 0) "Saved $count keyframes to Pictures/GizmoohDownloader!"
                 else "Could not save keyframes."
             )
         }
@@ -361,6 +400,86 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     // =========================================================================
+    // TRANSCRIPT STUDIO ACTIONS
+    // =========================================================================
+    fun selectTranscriptLanguageMode(mode: TranscriptLanguageMode) {
+        _transcriptLanguageMode.value = mode
+    }
+
+    fun transcribeSelectedVideo() {
+        val inspection = _selectedVideo.value
+        if (inspection == null) {
+            _transcriptState.value = TranscriptUiState.Error("Pumili muna ng video mula sa device o downloader.")
+            return
+        }
+        val settings = userSettings.value
+        if (!settings.hasApiKey) {
+            _transcriptState.value = TranscriptUiState.Error(
+                "Ilagay muna ang iyong Gemini API key sa API Key settings."
+            )
+            return
+        }
+
+        viewModelScope.launch {
+            _transcriptState.value = TranscriptUiState.Transcribing("Preparing video audio...")
+            try {
+                val result = geminiAnalyzer.transcribeVideoWithTimestamps(
+                    apiKey = settings.geminiApiKey,
+                    modelId = settings.selectedGeminiModel,
+                    inspection = inspection,
+                    languageMode = _transcriptLanguageMode.value,
+                    onStageUpdate = { stage ->
+                        _transcriptState.value = TranscriptUiState.Transcribing(stage)
+                    }
+                )
+
+                result.fold(
+                    onSuccess = { transcript ->
+                        val savedId = vaultRepository.saveVideoTranscript(transcript)
+                        _transcriptState.value = TranscriptUiState.Success(
+                            transcript.copy(id = savedId)
+                        )
+                    },
+                    onFailure = { err ->
+                        _transcriptState.value = TranscriptUiState.Error(
+                            err.localizedMessage ?: "Hindi nagtagumpay ang video transcription."
+                        )
+                    }
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _transcriptState.value = TranscriptUiState.Error(
+                    e.localizedMessage ?: "Transcription failed."
+                )
+            }
+        }
+    }
+
+    fun openTranscriptFromVault(entity: VideoTranscriptEntity) {
+        runCatching {
+            val mode = TranscriptLanguageMode.entries.firstOrNull {
+                it.name == entity.languageModeName
+            } ?: TranscriptLanguageMode.ORIGINAL_VERBATIM
+
+            val transcript = TranscriptSerializer.fromGeminiOrStoredJson(
+                jsonString = entity.payloadJson,
+                id = entity.id,
+                videoTitle = entity.videoTitle,
+                sourceUriString = entity.sourceUriString,
+                geminiModelUsed = entity.geminiModelUsed,
+                languageMode = mode,
+                createdAt = entity.createdAt
+            )
+            _transcriptState.value = TranscriptUiState.Success(transcript)
+        }.onFailure { err ->
+            _transcriptState.value = TranscriptUiState.Error(
+                err.localizedMessage ?: "Could not load transcript."
+            )
+        }
+    }
+
+    // =========================================================================
     // SETTINGS & GEMINI API KEY ACTIONS
     // =========================================================================
     fun saveAndVerifyApiKey(rawKey: String) {
@@ -423,5 +542,72 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             vaultRepository.deleteBlueprint(blueprint.id)
         }
+    }
+
+    fun deleteTranscript(transcript: VideoTranscriptEntity) {
+        viewModelScope.launch {
+            vaultRepository.deleteTranscript(transcript.id)
+        }
+    }
+
+    // =========================================================================
+    // AI FILIPINO DUBBER ACTIONS (PERSISTENT ACROSS BACK / BACKGROUND)
+    // =========================================================================
+    fun isDubbingBackgroundWorkActive(): Boolean = dubbingCoordinator.isBackgroundWorkActive()
+
+    fun refreshDubberEnvironment() = dubbingCoordinator.refreshEnvironment()
+
+    fun selectDubSourceLanguage(lang: DubSourceLanguage) = dubbingCoordinator.selectSourceLanguage(lang)
+
+    fun selectDubVoiceEngine(engine: DubVoiceEngine) = dubbingCoordinator.selectVoiceEngine(engine)
+
+    fun selectDubDuckingMode(mode: DubAudioDuckingMode) = dubbingCoordinator.selectDuckingMode(mode)
+
+    fun selectAndroidDubVoice(voiceId: String) = dubbingCoordinator.selectAndroidVoice(voiceId)
+
+    fun updateDubVoicePitch(pitch: Float) = dubbingCoordinator.updateVoicePitch(pitch)
+
+    fun updateDubBaseSpeed(rate: Float) = dubbingCoordinator.updateBaseSpeed(rate)
+
+    fun toggleMultiSpeaker(enabled: Boolean) = dubbingCoordinator.toggleMultiSpeaker(enabled)
+
+    fun cycleCharacterVoice(speakerKey: String) = dubbingCoordinator.cycleCharacterVoice(speakerKey)
+
+    fun downloadMmsTagalogModel() = dubbingCoordinator.downloadMmsTagalogModel()
+
+    fun deleteMmsTagalogModel() = dubbingCoordinator.deleteMmsTagalogModel()
+
+    fun generateFilipinoDubScript() {
+        val settings = userSettings.value
+        dubbingCoordinator.generateFilipinoDubScript(
+            inspection = _selectedVideo.value,
+            apiKey = settings.geminiApiKey,
+            modelId = settings.selectedGeminiModel
+        )
+    }
+
+    fun importOfflineDubScript(rawScript: String, onFeedback: (String) -> Unit) {
+        val count = dubbingCoordinator.importOfflineScript(rawScript)
+        if (count <= 0) {
+            onFeedback("Walang valid timestamp format. Gumamit ng SRT o [00:01 - 00:04] Teksto.")
+        } else {
+            onFeedback("Na-import ang $count timed Filipino dub lines!")
+        }
+    }
+
+    fun loadTranscriptIntoDubber(transcript: VideoTranscript) {
+        dubbingCoordinator.loadTranscriptIntoDubber(transcript)
+    }
+
+    fun updateDubLineFilipinoText(lineId: Long, newText: String) {
+        dubbingCoordinator.updateLineText(lineId, newText)
+    }
+
+    fun removeDubLine(lineId: Long) {
+        dubbingCoordinator.removeLine(lineId)
+    }
+
+    fun renderFilipinoDubbedVideo() {
+        dubbingCoordinator.renderDubbedVideo(_selectedVideo.value)
     }
 }

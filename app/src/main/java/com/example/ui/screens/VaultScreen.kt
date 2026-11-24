@@ -59,6 +59,9 @@ import com.example.R
 import com.example.data.local.DownloadedClipEntity
 import com.example.data.local.PromptBlueprintEntity
 import com.example.data.local.UserSettings
+import com.example.data.local.VideoTranscriptEntity
+import com.example.data.network.TranscriptSerializer
+import com.example.data.model.TranscriptLanguageMode
 import com.example.ui.components.StudioTopHeader
 import com.example.ui.components.VideoPlayerDialog
 import com.example.ui.components.copyTextToClipboard
@@ -82,12 +85,15 @@ fun VaultScreen(
     settings: UserSettings,
     downloadedClips: List<DownloadedClipEntity>,
     promptBlueprints: List<PromptBlueprintEntity>,
+    videoTranscripts: List<VideoTranscriptEntity>,
     onTogglePreferHd: (Boolean) -> Unit,
     onOpenKeySheet: () -> Unit,
     onAnalyzeClip: (localPath: String, contentUri: String) -> Unit,
     onOpenBlueprint: (PromptBlueprintEntity) -> Unit,
+    onOpenTranscript: (VideoTranscriptEntity) -> Unit,
     onDeleteClip: (DownloadedClipEntity) -> Unit,
     onDeleteBlueprint: (PromptBlueprintEntity) -> Unit,
+    onDeleteTranscript: (VideoTranscriptEntity) -> Unit,
     onShowMessage: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -109,7 +115,7 @@ fun VaultScreen(
             item {
                 StudioTopHeader(
                     title = stringResource(R.string.vault_headline),
-                    subtitle = "Manage saved watermark-free videos, extracted prompt blueprints, and your Gemini API key.",
+                    subtitle = "Manage saved videos, timestamped transcripts, extracted AI prompts, and your Gemini API key.",
                     hasApiKey = settings.hasApiKey,
                     onOpenKeySheet = onOpenKeySheet
                 )
@@ -199,7 +205,7 @@ fun VaultScreen(
                     SegmentedButton(
                         selected = selectedSegment == 0,
                         onClick = { selectedSegment = 0 },
-                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3),
                         colors = SegmentedButtonDefaults.colors(
                             activeContainerColor = StudioCyan.copy(alpha = 0.2f),
                             activeContentColor = StudioCyan,
@@ -208,12 +214,12 @@ fun VaultScreen(
                         ),
                         modifier = Modifier.testTag("vault_tab_clips")
                     ) {
-                        Text("Clips (${downloadedClips.size})")
+                        Text("Clips (${downloadedClips.size})", maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     SegmentedButton(
                         selected = selectedSegment == 1,
                         onClick = { selectedSegment = 1 },
-                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3),
                         colors = SegmentedButtonDefaults.colors(
                             activeContainerColor = StudioCoral.copy(alpha = 0.2f),
                             activeContentColor = StudioCoral,
@@ -222,57 +228,112 @@ fun VaultScreen(
                         ),
                         modifier = Modifier.testTag("vault_tab_prompts")
                     ) {
-                        Text("Prompts (${promptBlueprints.size})")
+                        Text("Prompts (${promptBlueprints.size})", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    SegmentedButton(
+                        selected = selectedSegment == 2,
+                        onClick = { selectedSegment = 2 },
+                        shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3),
+                        colors = SegmentedButtonDefaults.colors(
+                            activeContainerColor = StudioEmerald.copy(alpha = 0.2f),
+                            activeContentColor = StudioEmerald,
+                            inactiveContainerColor = StudioSurface,
+                            inactiveContentColor = StudioTextSecondary
+                        ),
+                        modifier = Modifier.testTag("vault_tab_transcripts")
+                    ) {
+                        Text("Scripts (${videoTranscripts.size})", maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
             }
 
-            if (selectedSegment == 0) {
-                if (downloadedClips.isEmpty()) {
-                    item {
-                        EmptyVaultPlaceholder(
-                            title = stringResource(R.string.vault_empty_title),
-                            description = stringResource(R.string.vault_empty_desc)
-                        )
-                    }
-                } else {
-                    items(downloadedClips, key = { it.id }) { clip ->
-                        VaultClipCard(
-                            clip = clip,
-                            onPlay = {
-                                val file = File(clip.localFilePath)
-                                val uriStr = if (file.exists()) {
-                                    android.net.Uri.fromFile(file).toString()
-                                } else {
-                                    clip.contentUriString
-                                }
-                                previewVideoData = uriStr to clip.title
-                            },
-                            onShare = { shareLocalVideo(context, clip.localFilePath) },
-                            onAnalyze = { onAnalyzeClip(clip.localFilePath, clip.contentUriString) },
-                            onDelete = { onDeleteClip(clip) }
-                        )
+            when (selectedSegment) {
+                0 -> {
+                    if (downloadedClips.isEmpty()) {
+                        item {
+                            EmptyVaultPlaceholder(
+                                title = stringResource(R.string.vault_empty_title),
+                                description = stringResource(R.string.vault_empty_desc)
+                            )
+                        }
+                    } else {
+                        items(downloadedClips, key = { it.id }) { clip ->
+                            VaultClipCard(
+                                clip = clip,
+                                onPlay = {
+                                    val file = File(clip.localFilePath)
+                                    val uriStr = if (file.exists()) {
+                                        android.net.Uri.fromFile(file).toString()
+                                    } else {
+                                        clip.contentUriString
+                                    }
+                                    previewVideoData = uriStr to clip.title
+                                },
+                                onShare = { shareLocalVideo(context, clip.localFilePath) },
+                                onAnalyze = { onAnalyzeClip(clip.localFilePath, clip.contentUriString) },
+                                onDelete = { onDeleteClip(clip) }
+                            )
+                        }
                     }
                 }
-            } else {
-                if (promptBlueprints.isEmpty()) {
-                    item {
-                        EmptyVaultPlaceholder(
-                            title = "No Saved Prompt Blueprints Yet",
-                            description = "Analyze any video in Prompt AI and every Master Video Prompt + Ingredient Image Prompt will be saved here."
-                        )
+                1 -> {
+                    if (promptBlueprints.isEmpty()) {
+                        item {
+                            EmptyVaultPlaceholder(
+                                title = "No Saved Prompt Blueprints Yet",
+                                description = "Analyze any video in Prompt AI and every Master Video Prompt + Ingredient Image Prompt will be saved here."
+                            )
+                        }
+                    } else {
+                        items(promptBlueprints, key = { it.id }) { bp ->
+                            VaultBlueprintCard(
+                                blueprint = bp,
+                                onOpen = { onOpenBlueprint(bp) },
+                                onCopyMaster = {
+                                    copyTextToClipboard(context, bp.videoTitle, bp.masterVideoPrompt)
+                                    onShowMessage("Copied master video prompt!")
+                                },
+                                onDelete = { onDeleteBlueprint(bp) }
+                            )
+                        }
                     }
-                } else {
-                    items(promptBlueprints, key = { it.id }) { bp ->
-                        VaultBlueprintCard(
-                            blueprint = bp,
-                            onOpen = { onOpenBlueprint(bp) },
-                            onCopyMaster = {
-                                copyTextToClipboard(context, bp.videoTitle, bp.masterVideoPrompt)
-                                onShowMessage("Copied master video prompt!")
-                            },
-                            onDelete = { onDeleteBlueprint(bp) }
-                        )
+                }
+                else -> {
+                    if (videoTranscripts.isEmpty()) {
+                        item {
+                            EmptyVaultPlaceholder(
+                                title = "No Saved Transcripts Yet",
+                                description = "Generate a complete timestamped transcript in the Transcript tab and it will be saved here."
+                            )
+                        }
+                    } else {
+                        items(videoTranscripts, key = { it.id }) { tr ->
+                            VaultTranscriptCard(
+                                entity = tr,
+                                onOpen = { onOpenTranscript(tr) },
+                                onCopyAll = {
+                                    val mode = TranscriptLanguageMode.entries.firstOrNull {
+                                        it.name == tr.languageModeName
+                                    } ?: TranscriptLanguageMode.ORIGINAL_VERBATIM
+                                    val parsed = TranscriptSerializer.fromGeminiOrStoredJson(
+                                        jsonString = tr.payloadJson,
+                                        id = tr.id,
+                                        videoTitle = tr.videoTitle,
+                                        sourceUriString = tr.sourceUriString,
+                                        geminiModelUsed = tr.geminiModelUsed,
+                                        languageMode = mode,
+                                        createdAt = tr.createdAt
+                                    )
+                                    copyTextToClipboard(
+                                        context,
+                                        tr.videoTitle,
+                                        TranscriptSerializer.formatTimestampedText(parsed)
+                                    )
+                                    onShowMessage("Copied timestamped transcript!")
+                                },
+                                onDelete = { onDeleteTranscript(tr) }
+                            )
+                        }
                     }
                 }
             }
@@ -495,6 +556,89 @@ private fun VaultBlueprintCard(
                     modifier = Modifier.weight(1f)
                 ) {
                     Text("Open Full Pack", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VaultTranscriptCard(
+    entity: VideoTranscriptEntity,
+    onOpen: () -> Unit,
+    onCopyAll: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = StudioSurface,
+        border = BorderStroke(1.dp, StudioEmerald.copy(alpha = 0.45f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .clickable { onOpen() }
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "${entity.detectedLanguage} · ${entity.segmentCount} segments",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = StudioEmerald
+                )
+                IconButton(
+                    onClick = onDelete,
+                    modifier = Modifier.testTag("delete_transcript_${entity.id}")
+                ) {
+                    Icon(Icons.Filled.DeleteOutline, contentDescription = "Delete transcript", tint = StudioTextSecondary)
+                }
+            }
+
+            Text(
+                text = entity.videoTitle,
+                style = MaterialTheme.typography.titleMedium,
+                color = StudioTextPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            Text(
+                text = entity.previewSnippet,
+                style = MaterialTheme.typography.bodySmall,
+                color = StudioTextSecondary,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onCopyAll,
+                    border = BorderStroke(1.dp, StudioBorder),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Filled.ContentCopy, contentDescription = null, tint = StudioEmerald, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Copy Script", color = StudioEmerald, style = MaterialTheme.typography.bodySmall)
+                }
+
+                Button(
+                    onClick = onOpen,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = StudioElevated,
+                        contentColor = StudioCyan
+                    ),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Open Full", style = MaterialTheme.typography.bodySmall)
                 }
             }
         }

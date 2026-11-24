@@ -45,7 +45,7 @@ class VideoExtractorRepository(private val context: Context) {
         try {
             val cleanUrl = extractFirstUrl(rawInput)
                 ?: return@withContext Result.failure(
-                    IllegalArgumentException("Walang valid na URL na nahanap. Mag-paste ng TikTok, Facebook, o Instagram link.")
+                    IllegalArgumentException("Walang valid na URL na nahanap. Mag-paste ng TikTok, Facebook, Instagram, YouTube, o Pinterest link.")
                 )
 
             val initialPlatform = SocialPlatform.detectFromUrl(cleanUrl)
@@ -56,7 +56,7 @@ class VideoExtractorRepository(private val context: Context) {
 
             if (platform == SocialPlatform.UNKNOWN) {
                 return@withContext Result.failure(
-                    IllegalArgumentException("Hindi sinusuportahan ang link na ito. Gumamit ng TikTok, Facebook, o Instagram video URL.")
+                    IllegalArgumentException("Hindi sinusuportahan ang link na ito. Gumamit ng TikTok, Facebook, Instagram, YouTube, o Pinterest URL.")
                 )
             }
 
@@ -70,6 +70,8 @@ class VideoExtractorRepository(private val context: Context) {
                 SocialPlatform.TIKTOK -> extractTikTok(resolvedUrl, cleanUrl)
                 SocialPlatform.FACEBOOK -> extractFacebook(resolvedUrl, cleanUrl)
                 SocialPlatform.INSTAGRAM -> extractInstagram(resolvedUrl, cleanUrl)
+                SocialPlatform.YOUTUBE -> YouTubeExtractorHelper.extract(client, resolvedUrl, cleanUrl)
+                SocialPlatform.PINTEREST -> PinterestExtractorHelper.extract(client, resolvedUrl, cleanUrl)
                 SocialPlatform.UNKNOWN -> null
             }
 
@@ -535,48 +537,59 @@ class VideoExtractorRepository(private val context: Context) {
         onProgress: (bytesRead: Long, totalBytes: Long) -> Unit
     ): Result<DownloadedVideoResult> = withContext(Dispatchers.IO) {
         try {
-            val downloadUrl = if (preferHd) {
-                info.hdDownloadUrl ?: info.sdDownloadUrl
-            } else {
-                info.sdDownloadUrl ?: info.hdDownloadUrl
-            } ?: return@withContext Result.failure(IllegalStateException("No downloadable video URL found."))
-
-            val req = Request.Builder()
-                .url(downloadUrl)
-                .header("User-Agent", NetworkClient.DESKTOP_USER_AGENT)
-                .header("Referer", info.resolvedPageUrl)
-                .get()
-                .build()
-
             val videosDir = File(context.filesDir, "videos").apply { mkdirs() }
             val safePlatform = info.platform.name.lowercase(Locale.US)
-            val fileName = "ReelForge_${safePlatform}_${System.currentTimeMillis()}.mp4"
+            val fileName = "Gizmooh_${safePlatform}_${System.currentTimeMillis()}.mp4"
             val localFile = File(videosDir, fileName)
 
-            client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    return@withContext Result.failure(
-                        IllegalStateException("Download failed (HTTP ${resp.code}). Link may have expired; extract again.")
-                    )
-                }
-                val body = resp.body ?: return@withContext Result.failure(
-                    IllegalStateException("Empty video response.")
-                )
-                val totalBytes = body.contentLength()
-                var bytesCopied = 0L
-                val buffer = ByteArray(16 * 1024)
+            val shouldMuxAdaptiveHd = preferHd &&
+                info.requiresAudioMux &&
+                !info.hdDownloadUrl.isNullOrBlank() &&
+                !info.audioUrl.isNullOrBlank()
 
-                body.byteStream().use { input ->
-                    FileOutputStream(localFile).use { output ->
-                        while (true) {
-                            val read = input.read(buffer)
-                            if (read == -1) break
-                            output.write(buffer, 0, read)
-                            bytesCopied += read
-                            onProgress(bytesCopied, totalBytes)
+            var downloadedOk = false
+            if (shouldMuxAdaptiveHd) {
+                val tempVideo = File(context.cacheDir, "mux_vid_${System.currentTimeMillis()}.mp4")
+                val tempAudio = File(context.cacheDir, "mux_aud_${System.currentTimeMillis()}.m4a")
+                try {
+                    downloadStreamToFile(
+                        url = info.hdDownloadUrl!!,
+                        referer = info.resolvedPageUrl,
+                        destFile = tempVideo,
+                        onProgress = { copied, total ->
+                            onProgress(copied, if (total > 0L) (total * 1.15).toLong() else -1L)
                         }
-                    }
+                    )
+                    downloadStreamToFile(
+                        url = info.audioUrl!!,
+                        referer = info.resolvedPageUrl,
+                        destFile = tempAudio,
+                        onProgress = { _, _ -> }
+                    )
+                    Mp4TrackMuxer.muxVideoAndAudio(tempVideo, tempAudio, localFile)
+                    downloadedOk = localFile.length() >= 1024L
+                } catch (muxErr: Exception) {
+                    Log.w(TAG, "Adaptive MP4 mux failed, falling back to direct stream: ${muxErr.message}")
+                    runCatching { localFile.delete() }
+                } finally {
+                    runCatching { tempVideo.delete() }
+                    runCatching { tempAudio.delete() }
                 }
+            }
+
+            if (!downloadedOk) {
+                val fallbackUrl = if (preferHd && !shouldMuxAdaptiveHd) {
+                    info.hdDownloadUrl ?: info.sdDownloadUrl
+                } else {
+                    info.sdDownloadUrl ?: info.hdDownloadUrl
+                } ?: return@withContext Result.failure(IllegalStateException("No downloadable video URL found."))
+
+                downloadStreamToFile(
+                    url = fallbackUrl,
+                    referer = info.resolvedPageUrl,
+                    destFile = localFile,
+                    onProgress = onProgress
+                )
             }
 
             if (localFile.length() < 1024L) {
@@ -604,6 +617,42 @@ class VideoExtractorRepository(private val context: Context) {
         }
     }
 
+    private fun downloadStreamToFile(
+        url: String,
+        referer: String,
+        destFile: File,
+        onProgress: (bytesRead: Long, totalBytes: Long) -> Unit
+    ) {
+        val req = Request.Builder()
+            .url(url)
+            .header("User-Agent", NetworkClient.DESKTOP_USER_AGENT)
+            .header("Referer", referer)
+            .get()
+            .build()
+
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                throw IllegalStateException("Download failed (HTTP ${resp.code}). Link may have expired; extract again.")
+            }
+            val body = resp.body ?: throw IllegalStateException("Empty video response.")
+            val totalBytes = body.contentLength()
+            var bytesCopied = 0L
+            val buffer = ByteArray(16 * 1024)
+
+            body.byteStream().use { input ->
+                FileOutputStream(destFile).use { output ->
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read == -1) break
+                        output.write(buffer, 0, read)
+                        bytesCopied += read
+                        onProgress(bytesCopied, totalBytes)
+                    }
+                }
+            }
+        }
+    }
+
     private fun saveCopyToMediaStore(sourceFile: File, fileName: String): Uri? {
         return runCatching {
             val resolver = context.contentResolver
@@ -611,7 +660,7 @@ class VideoExtractorRepository(private val context: Context) {
                 put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
                 put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/ReelForge")
+                    put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/GizmoohDownloader")
                     put(MediaStore.Video.Media.IS_PENDING, 1)
                 }
             }
@@ -654,8 +703,14 @@ class VideoExtractorRepository(private val context: Context) {
                 .get()
                 .build()
 
+            val isM4a = audioUrl.contains("mime=audio%2Fmp4", ignoreCase = true) ||
+                audioUrl.contains("mime=audio/mp4", ignoreCase = true) ||
+                audioUrl.contains(".m4a", ignoreCase = true)
+            val ext = if (isM4a) "m4a" else "mp3"
+            val mime = if (isM4a) "audio/mp4" else "audio/mpeg"
+
             val audioDir = File(context.filesDir, "audio").apply { mkdirs() }
-            val fileName = "ReelForge_Audio_${System.currentTimeMillis()}.mp3"
+            val fileName = "Gizmooh_Audio_${System.currentTimeMillis()}.$ext"
             val localFile = File(audioDir, fileName)
 
             client.newCall(req).execute().use { resp ->
@@ -670,9 +725,9 @@ class VideoExtractorRepository(private val context: Context) {
                 }
             }
 
-            val savedToMusic = saveAudioToMediaStore(localFile, fileName)
+            val savedToMusic = saveAudioToMediaStore(localFile, fileName, mime)
             Result.success(
-                if (savedToMusic) "Audio saved to Music/ReelForge ($fileName)"
+                if (savedToMusic) "Audio saved to Music/GizmoohDownloader ($fileName)"
                 else "Audio saved locally ($fileName)"
             )
         } catch (e: Exception) {
@@ -681,14 +736,14 @@ class VideoExtractorRepository(private val context: Context) {
         }
     }
 
-    private fun saveAudioToMediaStore(sourceFile: File, fileName: String): Boolean {
+    private fun saveAudioToMediaStore(sourceFile: File, fileName: String, mimeType: String): Boolean {
         return runCatching {
             val resolver = context.contentResolver
             val values = ContentValues().apply {
                 put(MediaStore.Audio.Media.DISPLAY_NAME, fileName)
-                put(MediaStore.Audio.Media.MIME_TYPE, "audio/mpeg")
+                put(MediaStore.Audio.Media.MIME_TYPE, mimeType)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    put(MediaStore.Audio.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MUSIC}/ReelForge")
+                    put(MediaStore.Audio.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MUSIC}/GizmoohDownloader")
                     put(MediaStore.Audio.Media.IS_PENDING, 1)
                 }
             }

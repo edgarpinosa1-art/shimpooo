@@ -135,14 +135,14 @@ class VideoFrameExtractor(private val context: Context) {
             val src = File(path)
             if (!src.exists() || src.length() == 0L) return@forEachIndexed
             runCatching {
-                val fileName = "ReelForge_Frame_${System.currentTimeMillis()}_${index + 1}.jpg"
+                val fileName = "Gizmooh_Frame_${System.currentTimeMillis()}_${index + 1}.jpg"
                 val values = android.content.ContentValues().apply {
                     put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, fileName)
                     put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
                     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
                         put(
                             android.provider.MediaStore.Images.Media.RELATIVE_PATH,
-                            "${android.os.Environment.DIRECTORY_PICTURES}/ReelForge"
+                            "${android.os.Environment.DIRECTORY_PICTURES}/GizmoohDownloader"
                         )
                         put(android.provider.MediaStore.Images.Media.IS_PENDING, 1)
                     }

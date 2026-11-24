@@ -29,3 +29,17 @@ data class PromptBlueprintEntity(
     val payloadJson: String,
     val createdAt: Long = System.currentTimeMillis()
 )
+
+@Entity(tableName = "video_transcripts")
+data class VideoTranscriptEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0L,
+    val videoTitle: String,
+    val sourceUriString: String,
+    val geminiModelUsed: String,
+    val languageModeName: String,
+    val detectedLanguage: String,
+    val previewSnippet: String,
+    val segmentCount: Int,
+    val payloadJson: String,
+    val createdAt: Long = System.currentTimeMillis()
+)

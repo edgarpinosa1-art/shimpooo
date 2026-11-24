@@ -1,14 +1,20 @@
 package com.example.data.network
 
 import android.content.Context
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.util.Base64
 import android.util.Log
+import com.example.data.dubbing.DubTimelineMath
+import com.example.data.model.DubLineItem
+import com.example.data.model.DubSourceLanguage
 import com.example.data.model.LocalVideoInspection
 import com.example.data.model.PromptBlueprint
 import com.example.data.model.PromptUpgradePreset
 import com.example.data.model.TargetVideoGenerator
+import com.example.data.model.TranscriptLanguageMode
 import com.example.data.model.VideoAspectRatio
+import com.example.data.model.VideoTranscript
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -255,6 +261,396 @@ class GeminiVideoAnalyzerRepository(private val context: Context) {
         }
     }
 
+    suspend fun transcribeVideoWithTimestamps(
+        apiKey: String,
+        modelId: String,
+        inspection: LocalVideoInspection,
+        languageMode: TranscriptLanguageMode,
+        onStageUpdate: (String) -> Unit
+    ): Result<VideoTranscript> = withContext(Dispatchers.IO) {
+        val cleanKey = apiKey.trim()
+        if (cleanKey.isBlank()) {
+            return@withContext Result.failure(
+                IllegalArgumentException("Ilagay muna ang iyong Gemini API key bago gumawa ng transcript.")
+            )
+        }
+
+        val tempVideoFile = File(context.cacheDir, "gemini_transcript_${System.currentTimeMillis()}.mp4")
+        var uploadedFileName: String? = null
+
+        try {
+            onStageUpdate("Preparing video audio stream...")
+            copyUriToFile(Uri.parse(inspection.uriString), tempVideoFile)
+
+            val fileSizeBytes = tempVideoFile.length()
+            val mimeType = inspection.mimeType.ifBlank { "video/mp4" }
+
+            onStageUpdate("Uploading full video to Gemini Files API...")
+            val uploaded = uploadViaFilesApi(cleanKey, tempVideoFile, mimeType, inspection.displayName)
+
+            val baseMediaPart: JSONObject = if (uploaded != null) {
+                uploadedFileName = uploaded.first
+                onStageUpdate("Processing full video & audio on Gemini...")
+                waitUntilFileActive(cleanKey, uploaded.first)
+                JSONObject().apply {
+                    put("file_data", JSONObject().apply {
+                        put("file_uri", uploaded.second)
+                        put("mime_type", mimeType)
+                    })
+                }
+            } else if (fileSizeBytes in 1L..(14L * 1024L * 1024L)) {
+                onStageUpdate("Encoding video inline for transcription...")
+                val base64Video = Base64.encodeToString(tempVideoFile.readBytes(), Base64.NO_WRAP)
+                JSONObject().apply {
+                    put("inline_data", JSONObject().apply {
+                        put("mime_type", mimeType)
+                        put("data", base64Video)
+                    })
+                }
+            } else {
+                return@withContext Result.failure(
+                    IllegalStateException("Hindi ma-upload ang malaking video sa Gemini Files API. Suriin ang internet at API key.")
+                )
+            }
+
+            val effectiveDurationMs = inspection.durationMs.takeIf { it > 0L }
+                ?: probeVideoDurationMs(tempVideoFile)
+            val windows = TranscriptSerializer.buildTimeWindows(effectiveDurationMs)
+            val isChunked = windows.size > 1
+            val chunkResults = mutableListOf<VideoTranscript>()
+
+            for ((index, window) in windows.withIndex()) {
+                val startLabel = TranscriptSerializer.formatClockTimestamp(window.first)
+                val endLabel = if (window.second > 0L) {
+                    TranscriptSerializer.formatClockTimestamp(window.second)
+                } else {
+                    "end of video"
+                }
+
+                if (isChunked) {
+                    onStageUpdate("Transcribing part ${index + 1}/${windows.size} ($startLabel - $endLabel)...")
+                } else {
+                    onStageUpdate("Transcribing full audio & aligning timestamps...")
+                }
+
+                val scopeInstruction = if (isChunked) {
+                    "Transcribe ONLY the portion between $startLabel and $endLabel of the attached video, verbatim and completely, keeping exact global video timestamps starting around $startLabel."
+                } else {
+                    "Listen carefully to the ENTIRE attached video from 00:00 until the very end ($endLabel)."
+                }
+
+                val instruction = """
+                    You are a precision broadcast transcriptionist.
+                    $scopeInstruction
+                    Language Directive: ${languageMode.directive}
+
+                    CRITICAL RULES FOR COMPLETE TRANSCRIPTION:
+                    1. Do NOT skip, summarize away, or omit any spoken words, dialogue, narration, or lyrics—transcribe EVERYTHING completely within the target range.
+                    2. Break the transcript into natural chronological segments (roughly 3 to 8 seconds or 1-2 sentences each).
+                    3. Every segment MUST have accurate global startTime and endTime formatted as MM:SS (or HH:MM:SS if >= 1 hour).
+                    4. Identify speaker turns cleanly (e.g. "Speaker 1", "Host", "Narrator", "Speaker 2").
+                    5. If there is a brief non-speech sound cue or musical intro/outro with no speech, optionally note it briefly like [Music] only when helpful, while capturing every spoken line verbatim.
+                    6. Also populate "fullPlainTranscript" with the continuous transcript text for this range without timestamps.
+                """.trimIndent()
+
+                val contentParts = JSONArray().apply {
+                    put(JSONObject(baseMediaPart.toString()))
+                    put(JSONObject().apply { put("text", instruction) })
+                }
+
+                val requestPayload = JSONObject().apply {
+                    put("contents", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("role", "user")
+                            put("parts", contentParts)
+                        })
+                    })
+                    put("generationConfig", JSONObject().apply {
+                        put("temperature", 0.2)
+                        put("maxOutputTokens", 8192)
+                        put("responseMimeType", "application/json")
+                        put("responseSchema", buildTranscriptResponseSchema())
+                    })
+                }
+
+                val responseJsonText = withTimeout(180_000L) {
+                    val url = "$GEMINI_BASE/v1beta/models/${modelId.trim()}:generateContent?key=$cleanKey"
+                    val req = Request.Builder()
+                        .url(url)
+                        .header("Content-Type", "application/json")
+                        .post(requestPayload.toString().toRequestBody("application/json".toMediaType()))
+                        .build()
+
+                    client.newCall(req).execute().use { resp ->
+                        val rawBody = resp.body?.string().orEmpty()
+                        if (!resp.isSuccessful) {
+                            throw IllegalStateException(parseGeminiErrorMessage(rawBody, resp.code))
+                        }
+                        extractTextFromGeminiResponse(rawBody)
+                    }
+                }
+
+                chunkResults.add(
+                    TranscriptSerializer.fromGeminiOrStoredJson(
+                        jsonString = responseJsonText,
+                        videoTitle = inspection.displayName,
+                        sourceUriString = inspection.uriString,
+                        geminiModelUsed = modelId,
+                        languageMode = languageMode
+                    )
+                )
+            }
+
+            val finalTranscript = if (chunkResults.size == 1) {
+                chunkResults.first()
+            } else {
+                TranscriptSerializer.mergeChunks(
+                    chunks = chunkResults,
+                    videoTitle = inspection.displayName,
+                    sourceUriString = inspection.uriString,
+                    geminiModelUsed = modelId,
+                    languageMode = languageMode
+                )
+            }
+
+            Result.success(finalTranscript)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Gemini transcription failed", e)
+            Result.failure(e)
+        } finally {
+            runCatching { tempVideoFile.delete() }
+            if (!uploadedFileName.isNullOrBlank()) {
+                runCatching { deleteGeminiFile(cleanKey, uploadedFileName) }
+            }
+        }
+    }
+
+    suspend fun generateIsochronicFilipinoDubScript(
+        apiKey: String,
+        modelId: String,
+        inspection: LocalVideoInspection,
+        sourceLanguage: DubSourceLanguage,
+        onStageUpdate: (String) -> Unit
+    ): Result<List<DubLineItem>> = withContext(Dispatchers.IO) {
+        val cleanKey = apiKey.trim()
+        if (cleanKey.isBlank()) {
+            return@withContext Result.failure(
+                IllegalArgumentException("Ilagay muna ang iyong Gemini API key para sa auto-translation, o mag-paste ng .SRT offline.")
+            )
+        }
+
+        val tempVideoFile = File(context.cacheDir, "gemini_dub_${System.currentTimeMillis()}.mp4")
+        var uploadedFileName: String? = null
+
+        try {
+            onStageUpdate("Preparing video for lip-timed translation...")
+            copyUriToFile(Uri.parse(inspection.uriString), tempVideoFile)
+
+            val fileSizeBytes = tempVideoFile.length()
+            val mimeType = inspection.mimeType.ifBlank { "video/mp4" }
+
+            onStageUpdate("Uploading video to Gemini Files API...")
+            val uploaded = uploadViaFilesApi(cleanKey, tempVideoFile, mimeType, inspection.displayName)
+
+            val baseMediaPart: JSONObject = if (uploaded != null) {
+                uploadedFileName = uploaded.first
+                onStageUpdate("Analyzing speech cadence & lip timing...")
+                waitUntilFileActive(cleanKey, uploaded.first)
+                JSONObject().apply {
+                    put("file_data", JSONObject().apply {
+                        put("file_uri", uploaded.second)
+                        put("mime_type", mimeType)
+                    })
+                }
+            } else if (fileSizeBytes in 1L..(14L * 1024L * 1024L)) {
+                onStageUpdate("Encoding clip for lip-timed translation...")
+                val base64Video = Base64.encodeToString(tempVideoFile.readBytes(), Base64.NO_WRAP)
+                JSONObject().apply {
+                    put("inline_data", JSONObject().apply {
+                        put("mime_type", mimeType)
+                        put("data", base64Video)
+                    })
+                }
+            } else {
+                return@withContext Result.failure(
+                    IllegalStateException("Hindi ma-upload ang malaking video sa Gemini Files API. Suriin ang internet o API key.")
+                )
+            }
+
+            val effectiveDurationMs = inspection.durationMs.takeIf { it > 0L }
+                ?: probeVideoDurationMs(tempVideoFile)
+            val windows = TranscriptSerializer.buildTimeWindows(effectiveDurationMs)
+            val isChunked = windows.size > 1
+            val chunkLineLists = mutableListOf<List<DubLineItem>>()
+            val discoveredRoster = linkedSetOf<String>()
+
+            for ((idx, window) in windows.withIndex()) {
+                val startLabel = TranscriptSerializer.formatClockTimestamp(window.first)
+                val endLabel = if (window.second > 0L) {
+                    TranscriptSerializer.formatClockTimestamp(window.second)
+                } else {
+                    "end of video"
+                }
+
+                onStageUpdate(
+                    if (isChunked) "Long-form dub chunk ${idx + 1}/${windows.size} ($startLabel - $endLabel)..."
+                    else "Generating syllable-matched Filipino dub lines..."
+                )
+
+                val scope = if (isChunked) {
+                    "Translate ONLY the dialogue occurring between $startLabel and $endLabel, keeping global video timestamps from the start of the video. Do NOT repeat lines before $startLabel or after $endLabel."
+                } else {
+                    "Translate EVERY spoken line in the entire video from 00:00.00 to $endLabel."
+                }
+
+                val rosterReminder = if (discoveredRoster.isNotEmpty()) {
+                    "\nLOCKED CHARACTER ROSTER FROM EARLIER PARTS (MUST REUSE EXACT SAME SPEAKER LABELS):\n" +
+                        discoveredRoster.joinToString("\n") { "- \"$it\"" } +
+                        "\nUse these exact strings whenever the same person speaks. Only create a new label if a completely new character speaks."
+                } else ""
+
+                val instruction = """
+                    You are an expert Filipino (Tagalog) Anime & Film Dubbing Script Adapter (Isochronic Lip-Sync Specialist).
+                    Source Language Hint: ${sourceLanguage.promptHint}
+                    $scope$rosterReminder
+
+                    CRITICAL ISOCHRONOUS LIP-SYNC RULES:
+                    1. Capture exact startTime and endTime in MM:SS.mmm (or HH:MM:SS.mmm if >= 1 hour, e.g., 00:02.150 to 00:05.400) matching when the speaker actually starts and finishes speaking!
+                    2. Keep segments non-overlapping and tightly aligned to mouth/speech bursts (1 short sentence or phrase per segment).
+                    3. Translate into natural, expressive conversational Filipino / Tagalog (avoid stiff Google-Translate phrasing).
+                    4. MATCH SYLLABLE COUNT & SPEAKING DURATION: The Filipino translation ("filipinoText") MUST take roughly the same time to speak aloud as the original English/Japanese line so the dubber matches lip timing cleanly.
+                    5. Omit non-speech sound tags like [Music] from "filipinoText" — put only words meant to be spoken aloud.
+                    6. STRICT CHARACTER VOICE CONSISTENCY: Use one stable canonical label per character across the entire video (e.g., "Character 1 (Male)", "Character 2 (Female)", or "Narrator"). NEVER put temporary moods like "(angry)" or "(whispering)" inside the speaker field.
+                """.trimIndent()
+
+                val contentParts = JSONArray().apply {
+                    put(JSONObject(baseMediaPart.toString()))
+                    put(JSONObject().apply { put("text", instruction) })
+                }
+
+                val requestPayload = JSONObject().apply {
+                    put("contents", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("role", "user")
+                            put("parts", contentParts)
+                        })
+                    })
+                    put("generationConfig", JSONObject().apply {
+                        put("temperature", 0.25)
+                        put("maxOutputTokens", 8192)
+                        put("responseMimeType", "application/json")
+                        put("responseSchema", buildDubScriptResponseSchema())
+                    })
+                }
+
+                val responseJsonText = executeChunkWithRetry(
+                    apiKey = cleanKey,
+                    modelId = modelId,
+                    requestPayload = requestPayload
+                )
+
+                val parsedObj = JSONObject(responseJsonText)
+                val segArr = parsedObj.optJSONArray("lines") ?: JSONArray()
+                val chunkLines = buildList {
+                    for (i in 0 until segArr.length()) {
+                        val item = segArr.optJSONObject(i) ?: continue
+                        val startMs = DubTimelineMath.parseTimestampToMs(item.optString("startTime")) ?: continue
+                        val rawEndMs = DubTimelineMath.parseTimestampToMs(item.optString("endTime"))
+                        val endMs = if (rawEndMs != null && rawEndMs > startMs) rawEndMs else startMs + 2500L
+                        val filipino = item.optString("filipinoText").trim()
+                        val orig = item.optString("originalText").trim()
+                        val canonicalSpeaker = DubTimelineMath.canonicalizeSpeakerName(
+                            item.optString("speaker", "Speaker 1")
+                        )
+                        if (filipino.isNotBlank()) {
+                            discoveredRoster.add(canonicalSpeaker)
+                            add(
+                                DubLineItem(
+                                    id = (i + 1).toLong(),
+                                    startMs = startMs,
+                                    endMs = endMs,
+                                    speaker = canonicalSpeaker,
+                                    originalText = orig,
+                                    filipinoText = filipino
+                                )
+                            )
+                        }
+                    }
+                }
+                chunkLineLists.add(chunkLines)
+            }
+
+            val mergedLines = DubTimelineMath.mergeDubScriptChunks(
+                chunkResults = chunkLineLists,
+                windows = windows
+            )
+
+            if (mergedLines.isEmpty()) {
+                Result.failure(IllegalStateException("Walang spoken dialogue na nakita sa video para i-dub."))
+            } else {
+                Result.success(mergedLines)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Gemini dub script failed", e)
+            Result.failure(e)
+        } finally {
+            runCatching { tempVideoFile.delete() }
+            if (!uploadedFileName.isNullOrBlank()) {
+                runCatching { deleteGeminiFile(cleanKey, uploadedFileName) }
+            }
+        }
+    }
+
+    private suspend fun executeChunkWithRetry(
+        apiKey: String,
+        modelId: String,
+        requestPayload: JSONObject
+    ): String {
+        var lastError: Exception? = null
+        repeat(2) { attempt ->
+            try {
+                return withTimeout(180_000L) {
+                    val url = "$GEMINI_BASE/v1beta/models/${modelId.trim()}:generateContent?key=$apiKey"
+                    val req = Request.Builder()
+                        .url(url)
+                        .header("Content-Type", "application/json")
+                        .post(requestPayload.toString().toRequestBody("application/json".toMediaType()))
+                        .build()
+
+                    client.newCall(req).execute().use { resp ->
+                        val rawBody = resp.body?.string().orEmpty()
+                        if (!resp.isSuccessful) {
+                            throw IllegalStateException(parseGeminiErrorMessage(rawBody, resp.code))
+                        }
+                        extractTextFromGeminiResponse(rawBody)
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                lastError = e
+                if (attempt == 0) delay(1200L)
+            }
+        }
+        throw lastError ?: IllegalStateException("Gemini request failed.")
+    }
+
+    private fun probeVideoDurationMs(videoFile: File): Long {
+        val mmr = MediaMetadataRetriever()
+        return try {
+            mmr.setDataSource(videoFile.absolutePath)
+            mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+        } catch (_: Exception) {
+            0L
+        } finally {
+            runCatching { mmr.release() }
+        }
+    }
+
     private fun copyUriToFile(uri: Uri, destFile: File) {
         if (uri.scheme == "file") {
             val src = File(uri.path ?: "")
@@ -325,7 +721,7 @@ class GeminiVideoAnalyzerRepository(private val context: Context) {
     }
 
     private suspend fun waitUntilFileActive(apiKey: String, fileName: String) {
-        repeat(24) {
+        repeat(40) {
             val req = Request.Builder()
                 .url("$GEMINI_BASE/v1beta/$fileName?key=$apiKey")
                 .get()
@@ -483,6 +879,73 @@ class GeminiVideoAnalyzerRepository(private val context: Context) {
                     )
                 )
             )
+        }
+    }
+
+    private fun buildTranscriptResponseSchema(): JSONObject {
+        fun str(desc: String) = JSONObject().apply {
+            put("type", "STRING")
+            put("description", desc)
+        }
+
+        val segmentSchema = JSONObject().apply {
+            put("type", "OBJECT")
+            put("properties", JSONObject().apply {
+                put("startTime", str("Segment start timestamp in MM:SS or HH:MM:SS format, e.g. 00:00"))
+                put("endTime", str("Segment end timestamp in MM:SS or HH:MM:SS format, e.g. 00:05"))
+                put("speaker", str("Speaker label e.g. Speaker 1, Host, Narrator"))
+                put("text", str("Complete verbatim spoken dialogue/narration for this time segment"))
+            })
+            put("required", JSONArray(listOf("startTime", "endTime", "speaker", "text")))
+        }
+
+        return JSONObject().apply {
+            put("type", "OBJECT")
+            put("properties", JSONObject().apply {
+                put("detectedLanguage", str("Primary spoken language(s) detected in the video"))
+                put("overallSummary", str("Concise 2-3 sentence summary of what is discussed in the video"))
+                put("segments", JSONObject().apply {
+                    put("type", "ARRAY")
+                    put("items", segmentSchema)
+                    put("description", "Complete chronological list of timestamped transcript segments covering the entire video")
+                })
+                put("fullPlainTranscript", str("Complete continuous transcript text combining all spoken lines without timestamps"))
+            })
+            put(
+                "required",
+                JSONArray(listOf("detectedLanguage", "overallSummary", "segments", "fullPlainTranscript"))
+            )
+        }
+    }
+
+    private fun buildDubScriptResponseSchema(): JSONObject {
+        fun str(desc: String) = JSONObject().apply {
+            put("type", "STRING")
+            put("description", desc)
+        }
+
+        val lineSchema = JSONObject().apply {
+            put("type", "OBJECT")
+            put("properties", JSONObject().apply {
+                put("startTime", str("Exact start timestamp in MM:SS.mmm format, e.g. 00:01.250"))
+                put("endTime", str("Exact end timestamp in MM:SS.mmm format, e.g. 00:04.100"))
+                put("speaker", str("Speaker or character label, e.g. Speaker 1, Narrator"))
+                put("originalText", str("Original spoken English/Japanese line"))
+                put("filipinoText", str("Natural conversational Filipino/Tagalog dubbing line matched in syllable length to fit startTime..endTime"))
+            })
+            put("required", JSONArray(listOf("startTime", "endTime", "speaker", "originalText", "filipinoText")))
+        }
+
+        return JSONObject().apply {
+            put("type", "OBJECT")
+            put("properties", JSONObject().apply {
+                put("lines", JSONObject().apply {
+                    put("type", "ARRAY")
+                    put("items", lineSchema)
+                    put("description", "Chronological lip-timed Filipino dubbing script lines")
+                })
+            })
+            put("required", JSONArray(listOf("lines")))
         }
     }
 }

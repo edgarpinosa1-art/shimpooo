@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "ReelForge"
+rootProject.name = "Gizmooh Downloader"
 
 include(":app")

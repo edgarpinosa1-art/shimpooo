@@ -25,4 +25,13 @@ interface VaultDao {
 
     @Query("DELETE FROM prompt_blueprints WHERE id = :id")
     suspend fun deletePromptBlueprint(id: Long)
+
+    @Query("SELECT * FROM video_transcripts ORDER BY createdAt DESC")
+    fun getAllVideoTranscripts(): Flow<List<VideoTranscriptEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertVideoTranscript(transcript: VideoTranscriptEntity): Long
+
+    @Query("DELETE FROM video_transcripts WHERE id = :id")
+    suspend fun deleteVideoTranscript(id: Long)
 }

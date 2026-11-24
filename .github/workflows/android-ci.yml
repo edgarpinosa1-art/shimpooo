@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   build-and-test:
-    name: Build & Test ReelForge
+    name: Build & Test Gizmooh Downloader
     runs-on: ubuntu-latest
 
     steps:
@@ -98,7 +98,7 @@ jobs:
       - name: Upload Debug APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ReelForge-debug-apk
+          name: GizmoohDownloader-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
@@ -132,7 +132,7 @@ jobs:
         if: steps.release_signing.outputs.enabled == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: ReelForge-release-outputs
+          name: GizmoohDownloader-release-outputs
           path: |
             app/build/outputs/apk/release/*.apk
             app/build/outputs/bundle/release/*.aab

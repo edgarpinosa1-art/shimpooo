@@ -9,6 +9,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -34,6 +36,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -89,6 +92,7 @@ import com.example.ui.theme.StudioTextPrimary
 import com.example.ui.theme.StudioTextSecondary
 import java.io.File
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DownloaderScreen(
     urlInput: String,
@@ -102,6 +106,8 @@ fun DownloaderScreen(
     onDownloadClick: (ExtractedVideoInfo) -> Unit,
     onDownloadAudioClick: (ExtractedVideoInfo) -> Unit,
     onSendClipToPromptStudio: (localPath: String, contentUri: String) -> Unit,
+    onSendClipToTranscript: (localPath: String, contentUri: String) -> Unit,
+    onSendClipToDubber: (localPath: String, contentUri: String) -> Unit,
     onOpenKeySheet: () -> Unit,
     onShowMessage: (String) -> Unit,
     modifier: Modifier = Modifier
@@ -141,14 +147,17 @@ fun DownloaderScreen(
                         verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         // Platform detection pills
-                        Row(
+                        FlowRow(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             listOf(
                                 SocialPlatform.TIKTOK,
                                 SocialPlatform.FACEBOOK,
-                                SocialPlatform.INSTAGRAM
+                                SocialPlatform.INSTAGRAM,
+                                SocialPlatform.YOUTUBE,
+                                SocialPlatform.PINTEREST
                             ).forEach { platform ->
                                 val active = detectedPlatform == platform ||
                                     detectedPlatform == SocialPlatform.UNKNOWN
@@ -325,7 +334,9 @@ fun DownloaderScreen(
                                     previewVideoData = uri to downloaderState.info.title
                                 },
                                 onShareClick = { },
-                                onSendToPromptStudio = { }
+                                onSendToPromptStudio = { },
+                                onSendToTranscript = { },
+                                onSendToDubber = { }
                             )
                         }
 
@@ -341,7 +352,9 @@ fun DownloaderScreen(
                                 onDownloadAudioClick = { },
                                 onPreviewClick = { },
                                 onShareClick = { },
-                                onSendToPromptStudio = { }
+                                onSendToPromptStudio = { },
+                                onSendToTranscript = { },
+                                onSendToDubber = { }
                             )
                         }
 
@@ -363,6 +376,18 @@ fun DownloaderScreen(
                                 },
                                 onSendToPromptStudio = {
                                     onSendClipToPromptStudio(
+                                        downloaderState.result.localFilePath,
+                                        downloaderState.result.contentUriString
+                                    )
+                                },
+                                onSendToTranscript = {
+                                    onSendClipToTranscript(
+                                        downloaderState.result.localFilePath,
+                                        downloaderState.result.contentUriString
+                                    )
+                                },
+                                onSendToDubber = {
+                                    onSendClipToDubber(
                                         downloaderState.result.localFilePath,
                                         downloaderState.result.contentUriString
                                     )
@@ -433,7 +458,9 @@ private fun ExtractedVideoCard(
     onDownloadAudioClick: () -> Unit,
     onPreviewClick: (String) -> Unit,
     onShareClick: () -> Unit,
-    onSendToPromptStudio: () -> Unit
+    onSendToPromptStudio: () -> Unit,
+    onSendToTranscript: () -> Unit,
+    onSendToDubber: () -> Unit
 ) {
     Surface(
         shape = RoundedCornerShape(22.dp),
@@ -590,7 +617,7 @@ private fun ExtractedVideoCard(
                             .height(48.dp)
                             .testTag("download_mp3_audio_button")
                     ) {
-                        Text("Save Audio Track (MP3)", color = StudioCyan, style = MaterialTheme.typography.labelLarge)
+                        Text("Save Audio Track", color = StudioCyan, style = MaterialTheme.typography.labelLarge)
                     }
                 }
             } else {
@@ -613,7 +640,7 @@ private fun ExtractedVideoCard(
                         )
                         Text(
                             text = if (downloadedResult.gallerySaved) {
-                                "Saved to Movies/ReelForge (${formatFileSize(downloadedResult.fileSizeBytes)})"
+                                "Saved to Movies/GizmoohDownloader (${formatFileSize(downloadedResult.fileSizeBytes)})"
                             } else {
                                 "Saved locally (${formatFileSize(downloadedResult.fileSizeBytes)})"
                             },
@@ -690,6 +717,45 @@ private fun ExtractedVideoCard(
                             color = StudioObsidian
                         )
                     }
+                }
+
+                OutlinedButton(
+                    onClick = onSendToTranscript,
+                    border = BorderStroke(1.dp, StudioCyan.copy(alpha = 0.6f)),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("send_to_transcript_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Subtitles,
+                        contentDescription = null,
+                        tint = StudioCyan,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Generate Timestamped Transcript →",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = StudioCyan
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = onSendToDubber,
+                    border = BorderStroke(1.dp, StudioEmerald.copy(alpha = 0.6f)),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("send_to_dubber_button")
+                ) {
+                    Text(
+                        text = "Dub Video to Filipino →",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = StudioEmerald
+                    )
                 }
             }
         }

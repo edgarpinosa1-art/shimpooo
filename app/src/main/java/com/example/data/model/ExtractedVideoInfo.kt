@@ -11,7 +11,8 @@ data class ExtractedVideoInfo(
     val hdDownloadUrl: String?,
     val sdDownloadUrl: String?,
     val audioUrl: String?,
-    val extractionMethod: String
+    val extractionMethod: String,
+    val requiresAudioMux: Boolean = false
 ) {
     val bestDownloadUrl: String?
         get() = hdDownloadUrl?.takeIf { it.isNotBlank() } ?: sdDownloadUrl?.takeIf { it.isNotBlank() }

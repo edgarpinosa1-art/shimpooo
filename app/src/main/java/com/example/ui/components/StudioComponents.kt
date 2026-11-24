@@ -138,7 +138,7 @@ fun StudioTopHeader(
     ) {
         Image(
             painter = painterResource(id = R.drawable.img_studio_banner),
-            contentDescription = "ReelForge creator studio backdrop",
+            contentDescription = "Gizmooh Downloader creator studio backdrop",
             contentScale = ContentScale.Crop,
             modifier = Modifier
                 .matchParentSize()
@@ -178,7 +178,7 @@ fun StudioTopHeader(
                             .background(StudioCyan)
                     )
                     Text(
-                        text = "REELFORGE STUDIO",
+                        text = "GIZMOOH STUDIO",
                         style = MaterialTheme.typography.labelMedium,
                         color = StudioCyan
                     )

@@ -581,7 +581,7 @@ fun PromptStudioScreen(
                         blueprint = blueprint,
                         onCopyAll = {
                             val fullPack = PromptBlueprintSerializer.formatFullCopyBundle(blueprint)
-                            copyTextToClipboard(context, "ReelForge Prompt Pack", fullPack)
+                            copyTextToClipboard(context, "Gizmooh Prompt Pack", fullPack)
                             onShowMessage("Copied complete Ingredient + Video Prompt Pack!")
                         }
                     )
@@ -772,7 +772,7 @@ private fun VideoStoryboardPreview(
                         .testTag("save_keyframes_gallery_button")
                 ) {
                     Text(
-                        text = "Save ${inspection.keyframePaths.size} Keyframes to Gallery (Pictures/ReelForge)",
+                        text = "Save ${inspection.keyframePaths.size} Keyframes to Gallery (Pictures/GizmoohDownloader)",
                         style = MaterialTheme.typography.labelSmall,
                         color = StudioCyan
                     )

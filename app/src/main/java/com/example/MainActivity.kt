@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -20,9 +21,13 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.RecordVoiceOver
+import androidx.compose.material.icons.outlined.Subtitles
 import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -55,10 +60,15 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.example.data.dubbing.DubbingForegroundService
+import com.example.ui.DubRenderUiState
+import com.example.ui.DubScriptUiState
 import com.example.ui.ReelForgeViewModel
 import com.example.ui.components.ApiKeyConfigBottomSheet
 import com.example.ui.screens.DownloaderScreen
+import com.example.ui.screens.DubberScreen
 import com.example.ui.screens.PromptStudioScreen
+import com.example.ui.screens.TranscriptScreen
 import com.example.ui.screens.VaultScreen
 import com.example.ui.theme.ReelForgeTheme
 import com.example.ui.theme.StudioCyan
@@ -69,12 +79,15 @@ import com.example.ui.theme.StudioTextSecondary
 import kotlinx.coroutines.launch
 
 const val ROUTE_DOWNLOADER = "downloader"
+const val ROUTE_TRANSCRIPT = "transcript"
+const val ROUTE_DUBBER = "dubber"
 const val ROUTE_PROMPT_STUDIO = "prompt_studio"
 const val ROUTE_VAULT = "vault"
 
 sealed interface SharedLaunchPayload {
     data class TextUrl(val text: String, val nonce: Long) : SharedLaunchPayload
     data class VideoUri(val uri: Uri, val nonce: Long) : SharedLaunchPayload
+    data class OpenDubber(val nonce: Long) : SharedLaunchPayload
 }
 
 private data class NavDestinationItem(
@@ -99,7 +112,8 @@ class MainActivity : ComponentActivity() {
             ReelForgeTheme {
                 ReelForgeApp(
                     sharedPayload = pendingSharedPayload.value,
-                    onSharedPayloadConsumed = { pendingSharedPayload.value = null }
+                    onSharedPayloadConsumed = { pendingSharedPayload.value = null },
+                    onBackgroundTaskRequested = { moveTaskToBack(true) }
                 )
             }
         }
@@ -113,9 +127,14 @@ class MainActivity : ComponentActivity() {
 
     @Suppress("DEPRECATION")
     private fun handleIncomingShareIntent(intent: Intent?) {
-        if (intent?.action != Intent.ACTION_SEND) return
-        val type = intent.type.orEmpty()
+        if (intent == null) return
         val nonce = System.currentTimeMillis()
+        if (intent.getBooleanExtra(DubbingForegroundService.EXTRA_OPEN_DUBBER, false)) {
+            pendingSharedPayload.value = SharedLaunchPayload.OpenDubber(nonce)
+            return
+        }
+        if (intent.action != Intent.ACTION_SEND) return
+        val type = intent.type.orEmpty()
         when {
             type.startsWith("text/") -> {
                 val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
@@ -141,6 +160,7 @@ class MainActivity : ComponentActivity() {
 fun ReelForgeApp(
     sharedPayload: SharedLaunchPayload? = null,
     onSharedPayloadConsumed: () -> Unit = {},
+    onBackgroundTaskRequested: () -> Unit = {},
     viewModel: ReelForgeViewModel = viewModel()
 ) {
     val navController = rememberNavController()
@@ -156,9 +176,13 @@ fun ReelForgeApp(
     val selectedUpgradePreset by viewModel.selectedUpgradePreset.collectAsStateWithLifecycle()
     val extraNotes by viewModel.extraCreatorNotes.collectAsStateWithLifecycle()
     val studioState by viewModel.studioState.collectAsStateWithLifecycle()
+    val transcriptLanguageMode by viewModel.transcriptLanguageMode.collectAsStateWithLifecycle()
+    val transcriptState by viewModel.transcriptState.collectAsStateWithLifecycle()
     val apiKeyCheckState by viewModel.apiKeyCheckState.collectAsStateWithLifecycle()
     val downloadedClips by viewModel.downloadedClips.collectAsStateWithLifecycle()
     val promptBlueprints by viewModel.promptBlueprints.collectAsStateWithLifecycle()
+    val videoTranscripts by viewModel.videoTranscripts.collectAsStateWithLifecycle()
+    val dubberState by viewModel.dubberState.collectAsStateWithLifecycle()
 
     var showApiKeySheet by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
@@ -179,6 +203,20 @@ fun ReelForgeApp(
                 selectedIcon = Icons.Filled.Download,
                 unselectedIcon = Icons.Outlined.Download,
                 testTag = "nav_tab_downloader"
+            ),
+            NavDestinationItem(
+                route = ROUTE_TRANSCRIPT,
+                labelRes = R.string.nav_transcript,
+                selectedIcon = Icons.Filled.Subtitles,
+                unselectedIcon = Icons.Outlined.Subtitles,
+                testTag = "nav_tab_transcript"
+            ),
+            NavDestinationItem(
+                route = ROUTE_DUBBER,
+                labelRes = R.string.nav_dubber,
+                selectedIcon = Icons.Filled.RecordVoiceOver,
+                unselectedIcon = Icons.Outlined.RecordVoiceOver,
+                testTag = "nav_tab_dubber"
             ),
             NavDestinationItem(
                 route = ROUTE_PROMPT_STUDIO,
@@ -219,8 +257,21 @@ fun ReelForgeApp(
                 viewModel.onLocalVideoSelected(sharedPayload.uri)
                 onSharedPayloadConsumed()
             }
+            is SharedLaunchPayload.OpenDubber -> {
+                navigateToTab(ROUTE_DUBBER)
+                onSharedPayloadConsumed()
+            }
             null -> Unit
         }
+    }
+
+    val isDubbingBusy = dubberState.scriptState is DubScriptUiState.Generating ||
+        dubberState.renderState is DubRenderUiState.Rendering ||
+        dubberState.mmsModelStatus == com.example.data.model.MmsModelStatus.DOWNLOADING
+
+    BackHandler(enabled = currentRoute == ROUTE_DOWNLOADER && isDubbingBusy) {
+        showMessage("Tuloy-tuloy sa background ang dubbing — makikita ang progress sa notification bar.")
+        onBackgroundTaskRequested()
     }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -330,11 +381,81 @@ fun ReelForgeApp(
                                 viewModel.loadDownloadedClipIntoStudio(localPath, contentUri)
                                 navigateToTab(ROUTE_PROMPT_STUDIO)
                             },
+                            onSendClipToTranscript = { localPath, contentUri ->
+                                viewModel.loadDownloadedClipIntoStudio(localPath, contentUri)
+                                navigateToTab(ROUTE_TRANSCRIPT)
+                            },
+                            onSendClipToDubber = { localPath, contentUri ->
+                                viewModel.loadDownloadedClipIntoStudio(localPath, contentUri)
+                                navigateToTab(ROUTE_DUBBER)
+                            },
                             onOpenKeySheet = {
                                 viewModel.resetKeyCheckState()
                                 showApiKeySheet = true
                             },
                             onShowMessage = showMessage
+                        )
+                    }
+
+                    composable(ROUTE_TRANSCRIPT) {
+                        TranscriptScreen(
+                            settings = settings,
+                            selectedVideo = selectedVideo,
+                            languageMode = transcriptLanguageMode,
+                            transcriptState = transcriptState,
+                            downloadedClips = downloadedClips,
+                            onVideoPicked = viewModel::onLocalVideoSelected,
+                            onSelectDownloadedClip = viewModel::loadDownloadedClipIntoStudio,
+                            onSelectLanguageMode = viewModel::selectTranscriptLanguageMode,
+                            onGenerateTranscriptClick = {
+                                if (!settings.hasApiKey) {
+                                    viewModel.resetKeyCheckState()
+                                    showApiKeySheet = true
+                                } else {
+                                    viewModel.transcribeSelectedVideo()
+                                }
+                            },
+                            onSendTranscriptToDubber = { transcript ->
+                                viewModel.loadTranscriptIntoDubber(transcript)
+                                navigateToTab(ROUTE_DUBBER)
+                            },
+                            onOpenKeySheet = {
+                                viewModel.resetKeyCheckState()
+                                showApiKeySheet = true
+                            },
+                            onShowMessage = showMessage
+                        )
+                    }
+
+                    composable(ROUTE_DUBBER) {
+                        DubberScreen(
+                            settings = settings,
+                            selectedVideo = selectedVideo,
+                            dubberState = dubberState,
+                            downloadedClips = downloadedClips,
+                            onVideoPicked = viewModel::onLocalVideoSelected,
+                            onSelectDownloadedClip = viewModel::loadDownloadedClipIntoStudio,
+                            onSelectSourceLanguage = viewModel::selectDubSourceLanguage,
+                            onSelectVoiceEngine = viewModel::selectDubVoiceEngine,
+                            onSelectDuckingMode = viewModel::selectDubDuckingMode,
+                            onSelectAndroidVoice = viewModel::selectAndroidDubVoice,
+                            onPitchChanged = viewModel::updateDubVoicePitch,
+                            onSpeedChanged = viewModel::updateDubBaseSpeed,
+                            onToggleMultiSpeaker = viewModel::toggleMultiSpeaker,
+                            onCycleCharacterVoice = viewModel::cycleCharacterVoice,
+                            onDownloadMmsModel = viewModel::downloadMmsTagalogModel,
+                            onDeleteMmsModel = viewModel::deleteMmsTagalogModel,
+                            onGenerateDubScript = viewModel::generateFilipinoDubScript,
+                            onImportOfflineScript = { raw ->
+                                viewModel.importOfflineDubScript(raw, showMessage)
+                            },
+                            onUpdateDubLineText = viewModel::updateDubLineFilipinoText,
+                            onRemoveDubLine = viewModel::removeDubLine,
+                            onRenderDubbedVideo = viewModel::renderFilipinoDubbedVideo,
+                            onOpenKeySheet = {
+                                viewModel.resetKeyCheckState()
+                                showApiKeySheet = true
+                            }
                         )
                     }
 
@@ -377,6 +498,7 @@ fun ReelForgeApp(
                             settings = settings,
                             downloadedClips = downloadedClips,
                             promptBlueprints = promptBlueprints,
+                            videoTranscripts = videoTranscripts,
                             onTogglePreferHd = viewModel::savePreferHd,
                             onOpenKeySheet = {
                                 viewModel.resetKeyCheckState()
@@ -390,8 +512,13 @@ fun ReelForgeApp(
                                 viewModel.openBlueprintFromVault(entity)
                                 navigateToTab(ROUTE_PROMPT_STUDIO)
                             },
+                            onOpenTranscript = { entity ->
+                                viewModel.openTranscriptFromVault(entity)
+                                navigateToTab(ROUTE_TRANSCRIPT)
+                            },
                             onDeleteClip = viewModel::deleteClip,
                             onDeleteBlueprint = viewModel::deleteBlueprint,
+                            onDeleteTranscript = viewModel::deleteTranscript,
                             onShowMessage = showMessage
                         )
                     }
