@@ -21,6 +21,7 @@ import com.example.data.dubbing.WavPcmTools
 import com.example.data.model.AiProvider
 import com.example.data.model.ModelCapabilityTag
 import com.example.data.model.ThirdPartyModelCatalog
+import com.example.data.network.FastDownloadPlanner
 import com.example.data.network.ThirdPartyTranscriptHelper
 import com.example.data.network.YouTubeExtractorHelper
 import org.junit.Assert.assertEquals
@@ -731,6 +732,26 @@ class ReelForgeCoreTest {
         assertTrue(extracted.startsWith("{"))
         assertTrue(extracted.endsWith("}"))
         assertTrue(extracted.contains("Kamusta kayo!"))
+    }
+
+    @Test
+    fun fastDownloadPlannerSplitsExactNonOverlappingRanges() {
+        assertEquals(104_857_600L, FastDownloadPlanner.parseTotalBytesFromContentRange("bytes 0-0/104857600"))
+        assertNull(FastDownloadPlanner.parseTotalBytesFromContentRange("bytes 0-0/*"))
+
+        val totalSize = 60L * 1024L * 1024L // 60 MB
+        val chunks = FastDownloadPlanner.planChunks(totalSize, maxThreads = 6)
+        assertEquals(6, chunks.size)
+        assertEquals(0L, chunks.first().startByte)
+        assertEquals(totalSize - 1L, chunks.last().endByte)
+        assertEquals(totalSize, chunks.sumOf { it.expectedLength })
+        for (i in 1 until chunks.size) {
+            assertEquals(chunks[i - 1].endByte + 1L, chunks[i].startByte)
+        }
+
+        // Tiny file (<1 MB) stays 1 chunk
+        val smallChunks = FastDownloadPlanner.planChunks(400L * 1024L, maxThreads = 6)
+        assertEquals(1, smallChunks.size)
     }
 }
 

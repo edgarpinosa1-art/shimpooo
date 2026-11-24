@@ -1,7 +1,9 @@
 package com.example.data.network
 
+import okhttp3.ConnectionPool
 import okhttp3.Cookie
 import okhttp3.CookieJar
+import okhttp3.Dispatcher
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
@@ -23,7 +25,13 @@ object NetworkClient {
     }
 
     val httpClient: OkHttpClient by lazy {
+        val dispatcher = Dispatcher().apply {
+            maxRequests = 40
+            maxRequestsPerHost = 12
+        }
         OkHttpClient.Builder()
+            .dispatcher(dispatcher)
+            .connectionPool(ConnectionPool(16, 5, TimeUnit.MINUTES))
             .cookieJar(inMemoryCookieJar)
             .followRedirects(true)
             .followSslRedirects(true)

@@ -118,6 +118,17 @@ fun formatFileSize(bytes: Long): String {
     }
 }
 
+fun formatDownloadSpeed(bytesPerSec: Long): String {
+    if (bytesPerSec <= 0L) return ""
+    val kb = bytesPerSec / 1024.0
+    val mb = kb / 1024.0
+    return if (mb >= 1.0) {
+        String.format(java.util.Locale.US, "%.1f MB/s", mb)
+    } else {
+        String.format(java.util.Locale.US, "%.0f KB/s", kb)
+    }
+}
+
 fun formatDurationSeconds(seconds: Int): String {
     if (seconds <= 0) return "--:--"
     val m = seconds / 60

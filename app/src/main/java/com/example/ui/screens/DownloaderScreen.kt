@@ -76,6 +76,7 @@ import com.example.ui.DownloaderUiState
 import com.example.ui.components.PlatformBadge
 import com.example.ui.components.StudioTopHeader
 import com.example.ui.components.VideoPlayerDialog
+import com.example.ui.components.formatDownloadSpeed
 import com.example.ui.components.formatDurationSeconds
 import com.example.ui.components.formatFileSize
 import com.example.ui.components.readClipboardText
@@ -349,6 +350,8 @@ fun DownloaderScreen(
                                 progress = downloaderState.progress,
                                 bytesCopied = downloaderState.bytesCopied,
                                 totalBytes = downloaderState.totalBytes,
+                                speedBytesPerSec = downloaderState.speedBytesPerSec,
+                                activeConnections = downloaderState.activeConnections,
                                 downloadedResult = null,
                                 onDownloadClick = { },
                                 onDownloadAudioClick = { },
@@ -462,7 +465,9 @@ private fun ExtractedVideoCard(
     onShareClick: () -> Unit,
     onSendToPromptStudio: () -> Unit,
     onSendToTranscript: () -> Unit,
-    onSendToDubber: () -> Unit
+    onSendToDubber: () -> Unit,
+    speedBytesPerSec: Long = 0L,
+    activeConnections: Int = 1
 ) {
     Surface(
         shape = RoundedCornerShape(22.dp),
@@ -558,6 +563,13 @@ private fun ExtractedVideoCard(
             }
 
             if (isDownloading) {
+                val speedText = formatDownloadSpeed(speedBytesPerSec)
+                val threadBadge = if (activeConnections > 1) "⚡ ${activeConnections}x Fast Threads" else "Fast Buffered Stream"
+                val metaSuffix = listOfNotNull(
+                    speedText.takeIf { it.isNotBlank() },
+                    threadBadge
+                ).joinToString(" · ")
+
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (progress != null) {
                         LinearProgressIndicator(
@@ -571,7 +583,7 @@ private fun ExtractedVideoCard(
                         )
                         val pct = (progress * 100).toInt()
                         Text(
-                            text = "Downloading MP4 ($pct%) · ${formatFileSize(bytesCopied)} / ${formatFileSize(totalBytes)}",
+                            text = "Fast Download ($pct%) · ${formatFileSize(bytesCopied)} / ${formatFileSize(totalBytes)}",
                             style = MaterialTheme.typography.labelSmall,
                             color = StudioTextSecondary
                         )
@@ -585,9 +597,16 @@ private fun ExtractedVideoCard(
                                 .clip(RoundedCornerShape(50))
                         )
                         Text(
-                            text = "Downloading stream · ${formatFileSize(bytesCopied)}",
+                            text = "Fast Download · ${formatFileSize(bytesCopied)}",
                             style = MaterialTheme.typography.labelSmall,
                             color = StudioTextSecondary
+                        )
+                    }
+                    if (metaSuffix.isNotBlank()) {
+                        Text(
+                            text = metaSuffix,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = StudioCyan
                         )
                     }
                 }

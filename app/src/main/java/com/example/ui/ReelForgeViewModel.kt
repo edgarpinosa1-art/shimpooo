@@ -52,7 +52,9 @@ sealed interface DownloaderUiState {
         val info: ExtractedVideoInfo,
         val progress: Float?,
         val bytesCopied: Long,
-        val totalBytes: Long
+        val totalBytes: Long,
+        val speedBytesPerSec: Long = 0L,
+        val activeConnections: Int = 1
     ) : DownloaderUiState
     data class Downloaded(
         val info: ExtractedVideoInfo,
@@ -229,17 +231,33 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
                 info = info,
                 progress = null,
                 bytesCopied = 0L,
-                totalBytes = -1L
+                totalBytes = -1L,
+                speedBytesPerSec = 0L,
+                activeConnections = 1
             )
             try {
                 val preferHd = userSettings.value.preferHdDownload
-                val dlResult = videoExtractor.downloadVideoToDevice(info, preferHd) { copied, total ->
+                var sampleStartMs = System.currentTimeMillis()
+                var sampleStartBytes = 0L
+                var currentSpeed = 0L
+
+                val dlResult = videoExtractor.downloadVideoToDevice(info, preferHd) { copied, total, threads ->
+                    val now = System.currentTimeMillis()
+                    val elapsedMs = now - sampleStartMs
+                    if (elapsedMs >= 450L) {
+                        val deltaBytes = (copied - sampleStartBytes).coerceAtLeast(0L)
+                        currentSpeed = (deltaBytes * 1000L) / elapsedMs
+                        sampleStartMs = now
+                        sampleStartBytes = copied
+                    }
                     val fraction = if (total > 0L) (copied.toFloat() / total.toFloat()).coerceIn(0f, 1f) else null
                     _downloaderState.value = DownloaderUiState.Downloading(
                         info = info,
                         progress = fraction,
                         bytesCopied = copied,
-                        totalBytes = total
+                        totalBytes = total,
+                        speedBytesPerSec = currentSpeed,
+                        activeConnections = threads
                     )
                 }
                 dlResult.fold(

@@ -10,7 +10,11 @@ import android.util.Log
 import com.example.data.model.DownloadedVideoResult
 import com.example.data.model.ExtractedVideoInfo
 import com.example.data.model.SocialPlatform
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
 import okhttp3.MediaType.Companion.toMediaType
@@ -22,12 +26,15 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.URLEncoder
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 private const val TAG = "VideoExtractorRepo"
 
 class VideoExtractorRepository(private val context: Context) {
 
     private val client = NetworkClient.httpClient
+    private val fastDownloader = FastParallelDownloader(client)
 
     fun extractFirstUrl(rawInput: String): String? = Companion.extractFirstUrl(rawInput)
 
@@ -534,7 +541,7 @@ class VideoExtractorRepository(private val context: Context) {
     suspend fun downloadVideoToDevice(
         info: ExtractedVideoInfo,
         preferHd: Boolean = true,
-        onProgress: (bytesRead: Long, totalBytes: Long) -> Unit
+        onProgress: (bytesRead: Long, totalBytes: Long, activeThreads: Int) -> Unit
     ): Result<DownloadedVideoResult> = withContext(Dispatchers.IO) {
         try {
             val videosDir = File(context.filesDir, "videos").apply { mkdirs() }
@@ -552,22 +559,56 @@ class VideoExtractorRepository(private val context: Context) {
                 val tempVideo = File(context.cacheDir, "mux_vid_${System.currentTimeMillis()}.mp4")
                 val tempAudio = File(context.cacheDir, "mux_aud_${System.currentTimeMillis()}.m4a")
                 try {
-                    downloadStreamToFile(
-                        url = info.hdDownloadUrl!!,
-                        referer = info.resolvedPageUrl,
-                        destFile = tempVideo,
-                        onProgress = { copied, total ->
-                            onProgress(copied, if (total > 0L) (total * 1.15).toLong() else -1L)
+                    val vidBytes = AtomicLong(0L)
+                    val audBytes = AtomicLong(0L)
+                    val vidTotal = AtomicLong(0L)
+                    val audTotal = AtomicLong(0L)
+                    val vidThreads = AtomicInteger(1)
+                    val audThreads = AtomicInteger(1)
+
+                    fun emitCombined() {
+                        val copied = vidBytes.get() + audBytes.get()
+                        val vTot = vidTotal.get()
+                        val aTot = audTotal.get()
+                        val total = if (vTot > 0L && aTot > 0L) vTot + aTot
+                        else if (vTot > 0L) (vTot * 1.15).toLong()
+                        else -1L
+                        onProgress(copied, total, vidThreads.get() + audThreads.get())
+                    }
+
+                    coroutineScope {
+                        val vidJob = async {
+                            fastDownloader.downloadToFileFast(
+                                url = info.hdDownloadUrl!!,
+                                referer = info.resolvedPageUrl,
+                                destFile = tempVideo,
+                                threads = 6
+                            ) { copied, total, threads ->
+                                vidBytes.set(copied)
+                                if (total > 0L) vidTotal.set(total)
+                                vidThreads.set(threads)
+                                emitCombined()
+                            }
                         }
-                    )
-                    downloadStreamToFile(
-                        url = info.audioUrl!!,
-                        referer = info.resolvedPageUrl,
-                        destFile = tempAudio,
-                        onProgress = { _, _ -> }
-                    )
+                        val audJob = async {
+                            fastDownloader.downloadToFileFast(
+                                url = info.audioUrl!!,
+                                referer = info.resolvedPageUrl,
+                                destFile = tempAudio,
+                                threads = 2
+                            ) { copied, total, threads ->
+                                audBytes.set(copied)
+                                if (total > 0L) audTotal.set(total)
+                                audThreads.set(threads)
+                                emitCombined()
+                            }
+                        }
+                        awaitAll(vidJob, audJob)
+                    }
                     Mp4TrackMuxer.muxVideoAndAudio(tempVideo, tempAudio, localFile)
                     downloadedOk = localFile.length() >= 1024L
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (muxErr: Exception) {
                     Log.w(TAG, "Adaptive MP4 mux failed, falling back to direct stream: ${muxErr.message}")
                     runCatching { localFile.delete() }
@@ -584,10 +625,11 @@ class VideoExtractorRepository(private val context: Context) {
                     info.sdDownloadUrl ?: info.hdDownloadUrl
                 } ?: return@withContext Result.failure(IllegalStateException("No downloadable video URL found."))
 
-                downloadStreamToFile(
+                fastDownloader.downloadToFileFast(
                     url = fallbackUrl,
                     referer = info.resolvedPageUrl,
                     destFile = localFile,
+                    threads = 6,
                     onProgress = onProgress
                 )
             }
@@ -611,45 +653,11 @@ class VideoExtractorRepository(private val context: Context) {
                     fileName = fileName
                 )
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Download error", e)
             Result.failure(e)
-        }
-    }
-
-    private fun downloadStreamToFile(
-        url: String,
-        referer: String,
-        destFile: File,
-        onProgress: (bytesRead: Long, totalBytes: Long) -> Unit
-    ) {
-        val req = Request.Builder()
-            .url(url)
-            .header("User-Agent", NetworkClient.DESKTOP_USER_AGENT)
-            .header("Referer", referer)
-            .get()
-            .build()
-
-        client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                throw IllegalStateException("Download failed (HTTP ${resp.code}). Link may have expired; extract again.")
-            }
-            val body = resp.body ?: throw IllegalStateException("Empty video response.")
-            val totalBytes = body.contentLength()
-            var bytesCopied = 0L
-            val buffer = ByteArray(16 * 1024)
-
-            body.byteStream().use { input ->
-                FileOutputStream(destFile).use { output ->
-                    while (true) {
-                        val read = input.read(buffer)
-                        if (read == -1) break
-                        output.write(buffer, 0, read)
-                        bytesCopied += read
-                        onProgress(bytesCopied, totalBytes)
-                    }
-                }
-            }
         }
     }
 
@@ -713,23 +721,20 @@ class VideoExtractorRepository(private val context: Context) {
             val fileName = "Gizmooh_Audio_${System.currentTimeMillis()}.$ext"
             val localFile = File(audioDir, fileName)
 
-            client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    return@withContext Result.failure(
-                        IllegalStateException("Audio download failed (HTTP ${resp.code}).")
-                    )
-                }
-                val body = resp.body ?: return@withContext Result.failure(IllegalStateException("Empty audio response."))
-                body.byteStream().use { input ->
-                    FileOutputStream(localFile).use { output -> input.copyTo(output) }
-                }
-            }
+            fastDownloader.downloadToFileFast(
+                url = audioUrl,
+                referer = info.resolvedPageUrl,
+                destFile = localFile,
+                threads = 4
+            ) { _, _, _ -> }
 
             val savedToMusic = saveAudioToMediaStore(localFile, fileName, mime)
             Result.success(
                 if (savedToMusic) "Audio saved to Music/GizmoohDownloader ($fileName)"
                 else "Audio saved locally ($fileName)"
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Audio download error", e)
             Result.failure(e)
