@@ -176,6 +176,7 @@ fun DubberScreen(
                     title = stringResource(R.string.dubber_headline),
                     subtitle = stringResource(R.string.dubber_subtitle),
                     hasApiKey = settings.hasApiKey,
+                    providerLabel = settings.activeProvider.shortBadge,
                     onOpenKeySheet = onOpenKeySheet
                 )
             }

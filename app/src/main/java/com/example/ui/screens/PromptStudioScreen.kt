@@ -152,6 +152,7 @@ fun PromptStudioScreen(
                     title = stringResource(R.string.studio_headline),
                     subtitle = stringResource(R.string.studio_subtitle),
                     hasApiKey = settings.hasApiKey,
+                    providerLabel = settings.activeProvider.shortBadge,
                     onOpenKeySheet = onOpenKeySheet
                 )
             }
@@ -218,12 +219,12 @@ fun PromptStudioScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "Key: ${settings.maskedApiKey}",
+                                text = "${settings.activeProvider.shortBadge}: ${settings.maskedApiKey}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = StudioEmerald
                             )
                             Text(
-                                text = "Model: ${settings.selectedGeminiModel}",
+                                text = settings.activeDisplayModel,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = StudioCyan
                             )

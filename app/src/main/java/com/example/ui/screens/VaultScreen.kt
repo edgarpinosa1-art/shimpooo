@@ -115,8 +115,9 @@ fun VaultScreen(
             item {
                 StudioTopHeader(
                     title = stringResource(R.string.vault_headline),
-                    subtitle = "Manage saved videos, timestamped transcripts, extracted AI prompts, and your Gemini API key.",
+                    subtitle = "Manage saved videos, timestamped transcripts, extracted AI prompts, and your AI API key.",
                     hasApiKey = settings.hasApiKey,
+                    providerLabel = settings.activeProvider.shortBadge,
                     onOpenKeySheet = onOpenKeySheet
                 )
             }
@@ -150,12 +151,12 @@ fun VaultScreen(
                                 Icon(Icons.Filled.Key, contentDescription = null, tint = StudioCyan)
                                 Column {
                                     Text(
-                                        text = "Gemini API Key & Model",
+                                        text = "${settings.activeProvider.shortBadge} API Key & Models",
                                         style = MaterialTheme.typography.titleMedium,
                                         color = StudioTextPrimary
                                     )
                                     Text(
-                                        text = "${settings.maskedApiKey} · ${settings.selectedGeminiModel}",
+                                        text = "${settings.maskedApiKey} · ${settings.activeDisplayModel}",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = StudioTextSecondary
                                     )

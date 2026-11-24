@@ -12,6 +12,8 @@ import com.example.data.local.SettingsDataStore
 import com.example.data.local.UserSettings
 import com.example.data.local.VaultRepository
 import com.example.data.local.VideoTranscriptEntity
+import com.example.data.model.AiProvider
+import com.example.data.model.DetectedAiModel
 import com.example.data.model.DownloadedVideoResult
 import com.example.data.model.DubAudioDuckingMode
 import com.example.data.model.DubSourceLanguage
@@ -19,6 +21,7 @@ import com.example.data.model.DubVoiceEngine
 import com.example.data.model.ExtractedVideoInfo
 import com.example.data.model.LocalVideoInspection
 import com.example.data.model.MmsModelStatus
+import com.example.data.model.ModelCapabilityTag
 import com.example.data.model.PromptBlueprint
 import com.example.data.model.PromptUpgradePreset
 import com.example.data.model.SocialPlatform
@@ -28,6 +31,7 @@ import com.example.data.model.VideoAspectRatio
 import com.example.data.model.VideoTranscript
 import com.example.data.network.GeminiVideoAnalyzerRepository
 import com.example.data.network.PromptBlueprintSerializer
+import com.example.data.network.ThirdPartyAiRepository
 import com.example.data.network.TranscriptSerializer
 import com.example.data.network.VideoExtractorRepository
 import com.example.data.network.VideoFrameExtractor
@@ -78,7 +82,11 @@ sealed interface ApiKeyCheckState {
     data object Verifying : ApiKeyCheckState
     data class Valid(
         val message: String,
-        val liveModels: List<Pair<String, String>> = emptyList()
+        val provider: AiProvider = AiProvider.GEMINI,
+        val liveModels: List<Pair<String, String>> = emptyList(),
+        val detectedModels: List<DetectedAiModel> = emptyList(),
+        val recommendedSttModel: String? = null,
+        val recommendedChatModel: String? = null
     ) : ApiKeyCheckState
     data class Invalid(val message: String) : ApiKeyCheckState
 }
@@ -90,6 +98,7 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
     private val videoExtractor = VideoExtractorRepository(application)
     private val frameExtractor = VideoFrameExtractor(application)
     private val geminiAnalyzer = GeminiVideoAnalyzerRepository(application)
+    private val thirdPartyAi = ThirdPartyAiRepository(application)
     private val dubbingCoordinator = DubbingJobCoordinator.getInstance(application)
 
     val userSettings: StateFlow<UserSettings> = settingsStore.settingsFlow
@@ -332,26 +341,53 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
         val settings = userSettings.value
         if (!settings.hasApiKey) {
             _studioState.value = StudioAnalysisUiState.Error(
-                "Ilagay muna ang iyong Gemini API key sa API Key settings."
+                "Ilagay muna ang iyong ${settings.activeProvider.shortBadge} API key sa API Key settings."
             )
             return
         }
 
         viewModelScope.launch {
-            _studioState.value = StudioAnalysisUiState.Analyzing("Preparing video...")
+            _studioState.value = StudioAnalysisUiState.Analyzing("Preparing video via ${settings.activeProvider.shortBadge}...")
             try {
-                val result = geminiAnalyzer.analyzeVideoForPrompts(
-                    apiKey = settings.geminiApiKey,
-                    modelId = settings.selectedGeminiModel,
-                    inspection = inspection,
-                    targetGenerator = settings.targetGenerator,
-                    aspectRatio = _selectedAspectRatio.value,
-                    upgradePreset = _selectedUpgradePreset.value,
-                    extraCreatorNotes = _extraCreatorNotes.value.trim(),
-                    onStageUpdate = { stage ->
-                        _studioState.value = StudioAnalysisUiState.Analyzing(stage)
-                    }
-                )
+                val result = if (settings.activeProvider == AiProvider.GEMINI) {
+                    geminiAnalyzer.analyzeVideoForPrompts(
+                        apiKey = settings.geminiApiKey,
+                        modelId = settings.selectedGeminiModel,
+                        inspection = inspection,
+                        targetGenerator = settings.targetGenerator,
+                        aspectRatio = _selectedAspectRatio.value,
+                        upgradePreset = _selectedUpgradePreset.value,
+                        extraCreatorNotes = _extraCreatorNotes.value.trim(),
+                        onStageUpdate = { stage ->
+                            _studioState.value = StudioAnalysisUiState.Analyzing(stage)
+                        },
+                        onModelAutoFallback = { fallbackModel ->
+                            viewModelScope.launch { settingsStore.saveGeminiModel(fallbackModel) }
+                        }
+                    )
+                } else {
+                    thirdPartyAi.analyzeVideoForPromptsWithThirdParty(
+                        provider = settings.activeProvider,
+                        apiKey = settings.thirdPartyApiKey,
+                        baseUrl = settings.effectiveThirdPartyBaseUrl,
+                        chatModelId = settings.selectedChatModel,
+                        sttModelId = settings.selectedSttModel,
+                        inspection = inspection,
+                        targetGenerator = settings.targetGenerator,
+                        aspectRatio = _selectedAspectRatio.value,
+                        upgradePreset = _selectedUpgradePreset.value,
+                        extraNotes = _extraCreatorNotes.value.trim(),
+                        onStageUpdate = { stage ->
+                            _studioState.value = StudioAnalysisUiState.Analyzing(stage)
+                        },
+                        onModelsAutoUpdated = { newStt, newChat ->
+                            viewModelScope.launch {
+                                if (!newStt.isNullOrBlank()) settingsStore.saveSelectedSttModel(newStt)
+                                if (!newChat.isNullOrBlank()) settingsStore.saveSelectedChatModel(newChat)
+                            }
+                        }
+                    )
+                }
 
                 result.fold(
                     onSuccess = { blueprint ->
@@ -362,7 +398,7 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
                     },
                     onFailure = { err ->
                         _studioState.value = StudioAnalysisUiState.Error(
-                            err.localizedMessage ?: "Hindi nagtagumpay ang Gemini analysis."
+                            err.localizedMessage ?: "Hindi nagtagumpay ang video analysis."
                         )
                     }
                 )
@@ -415,23 +451,49 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
         val settings = userSettings.value
         if (!settings.hasApiKey) {
             _transcriptState.value = TranscriptUiState.Error(
-                "Ilagay muna ang iyong Gemini API key sa API Key settings."
+                "Ilagay muna ang iyong ${settings.activeProvider.shortBadge} API key sa API Key settings."
             )
             return
         }
 
         viewModelScope.launch {
-            _transcriptState.value = TranscriptUiState.Transcribing("Preparing video audio...")
+            _transcriptState.value = TranscriptUiState.Transcribing(
+                "Preparing audio via ${settings.activeProvider.shortBadge}..."
+            )
             try {
-                val result = geminiAnalyzer.transcribeVideoWithTimestamps(
-                    apiKey = settings.geminiApiKey,
-                    modelId = settings.selectedGeminiModel,
-                    inspection = inspection,
-                    languageMode = _transcriptLanguageMode.value,
-                    onStageUpdate = { stage ->
-                        _transcriptState.value = TranscriptUiState.Transcribing(stage)
-                    }
-                )
+                val result = if (settings.activeProvider == AiProvider.GEMINI) {
+                    geminiAnalyzer.transcribeVideoWithTimestamps(
+                        apiKey = settings.geminiApiKey,
+                        modelId = settings.selectedGeminiModel,
+                        inspection = inspection,
+                        languageMode = _transcriptLanguageMode.value,
+                        onStageUpdate = { stage ->
+                            _transcriptState.value = TranscriptUiState.Transcribing(stage)
+                        },
+                        onModelAutoFallback = { fallbackModel ->
+                            viewModelScope.launch { settingsStore.saveGeminiModel(fallbackModel) }
+                        }
+                    )
+                } else {
+                    thirdPartyAi.transcribeVideoWithThirdParty(
+                        provider = settings.activeProvider,
+                        apiKey = settings.thirdPartyApiKey,
+                        baseUrl = settings.effectiveThirdPartyBaseUrl,
+                        sttModelId = settings.selectedSttModel,
+                        chatModelId = settings.selectedChatModel,
+                        inspection = inspection,
+                        languageMode = _transcriptLanguageMode.value,
+                        onStageUpdate = { stage ->
+                            _transcriptState.value = TranscriptUiState.Transcribing(stage)
+                        },
+                        onModelsAutoUpdated = { newStt, newChat ->
+                            viewModelScope.launch {
+                                if (!newStt.isNullOrBlank()) settingsStore.saveSelectedSttModel(newStt)
+                                if (!newChat.isNullOrBlank()) settingsStore.saveSelectedChatModel(newChat)
+                            }
+                        }
+                    )
+                }
 
                 result.fold(
                     onSuccess = { transcript ->
@@ -480,30 +542,77 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     // =========================================================================
-    // SETTINGS & GEMINI API KEY ACTIONS
+    // SETTINGS & MULTI-PROVIDER AI KEY ACTIONS
     // =========================================================================
-    fun saveAndVerifyApiKey(rawKey: String) {
-        val cleaned = rawKey.trim()
+    fun saveActiveProvider(provider: AiProvider) {
         viewModelScope.launch {
-            settingsStore.saveGeminiApiKey(cleaned)
-            if (cleaned.isEmpty()) {
-                _apiKeyCheckState.value = ApiKeyCheckState.Idle
-                return@launch
-            }
-            _apiKeyCheckState.value = ApiKeyCheckState.Verifying
-            val res = geminiAnalyzer.verifyApiKey(cleaned)
-            if (res.isValid) {
-                val currentModel = userSettings.value.selectedGeminiModel
-                val isCurrentAvailable = res.availableModels.any { it.first == currentModel }
-                if (!isCurrentAvailable && !res.recommendedModelId.isNullOrBlank()) {
-                    settingsStore.saveGeminiModel(res.recommendedModelId)
+            settingsStore.saveActiveProvider(provider)
+            _apiKeyCheckState.value = ApiKeyCheckState.Idle
+        }
+    }
+
+    fun saveAndVerifyProviderConfig(
+        provider: AiProvider,
+        rawKey: String,
+        rawBaseUrl: String
+    ) {
+        val cleanedKey = rawKey.trim()
+        val cleanedUrl = rawBaseUrl.trim()
+        viewModelScope.launch {
+            settingsStore.saveActiveProvider(provider)
+            if (provider == AiProvider.GEMINI) {
+                settingsStore.saveGeminiApiKey(cleanedKey)
+                if (cleanedKey.isEmpty()) {
+                    _apiKeyCheckState.value = ApiKeyCheckState.Idle
+                    return@launch
                 }
-                _apiKeyCheckState.value = ApiKeyCheckState.Valid(
-                    message = res.message,
-                    liveModels = res.availableModels
-                )
+                _apiKeyCheckState.value = ApiKeyCheckState.Verifying
+                val res = geminiAnalyzer.verifyApiKey(cleanedKey)
+                if (res.isValid) {
+                    val currentModel = userSettings.value.selectedGeminiModel
+                    val isCurrentAvailable = res.availableModels.any { it.first == currentModel }
+                    if (!isCurrentAvailable && !res.recommendedModelId.isNullOrBlank()) {
+                        settingsStore.saveGeminiModel(res.recommendedModelId)
+                    }
+                    _apiKeyCheckState.value = ApiKeyCheckState.Valid(
+                        message = res.message,
+                        provider = AiProvider.GEMINI,
+                        liveModels = res.availableModels,
+                        detectedModels = res.availableModels.map { (id, label) ->
+                            DetectedAiModel(id, label, ModelCapabilityTag.MULTIMODAL_AUDIO)
+                        }
+                    )
+                } else {
+                    _apiKeyCheckState.value = ApiKeyCheckState.Invalid(res.message)
+                }
             } else {
-                _apiKeyCheckState.value = ApiKeyCheckState.Invalid(res.message)
+                settingsStore.saveThirdPartyConfig(provider, cleanedKey, cleanedUrl)
+                if (cleanedKey.isEmpty()) {
+                    _apiKeyCheckState.value = ApiKeyCheckState.Idle
+                    return@launch
+                }
+                _apiKeyCheckState.value = ApiKeyCheckState.Verifying
+                val res = thirdPartyAi.verifyAndDetectModels(provider, cleanedKey, cleanedUrl)
+                if (res.isValid) {
+                    val curSettings = userSettings.value
+                    val liveIds = res.allModels.map { it.id }.toSet()
+                    if (!res.recommendedSttModel.isNullOrBlank() && curSettings.selectedSttModel !in liveIds) {
+                        settingsStore.saveSelectedSttModel(res.recommendedSttModel)
+                    }
+                    if (!res.recommendedChatModel.isNullOrBlank() && curSettings.selectedChatModel !in liveIds) {
+                        settingsStore.saveSelectedChatModel(res.recommendedChatModel)
+                    }
+                    _apiKeyCheckState.value = ApiKeyCheckState.Valid(
+                        message = res.message,
+                        provider = provider,
+                        liveModels = res.allModels.map { it.id to it.displayLabel },
+                        detectedModels = res.allModels,
+                        recommendedSttModel = res.recommendedSttModel,
+                        recommendedChatModel = res.recommendedChatModel
+                    )
+                } else {
+                    _apiKeyCheckState.value = ApiKeyCheckState.Invalid(res.message)
+                }
             }
         }
     }
@@ -514,6 +623,14 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun saveGeminiModel(modelId: String) {
         viewModelScope.launch { settingsStore.saveGeminiModel(modelId) }
+    }
+
+    fun saveSelectedSttModel(modelId: String) {
+        viewModelScope.launch { settingsStore.saveSelectedSttModel(modelId) }
+    }
+
+    fun saveSelectedChatModel(modelId: String) {
+        viewModelScope.launch { settingsStore.saveSelectedChatModel(modelId) }
     }
 
     fun saveTargetGenerator(generator: TargetVideoGenerator) {
@@ -578,11 +695,9 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
     fun deleteMmsTagalogModel() = dubbingCoordinator.deleteMmsTagalogModel()
 
     fun generateFilipinoDubScript() {
-        val settings = userSettings.value
         dubbingCoordinator.generateFilipinoDubScript(
             inspection = _selectedVideo.value,
-            apiKey = settings.geminiApiKey,
-            modelId = settings.selectedGeminiModel
+            settings = userSettings.value
         )
     }
 

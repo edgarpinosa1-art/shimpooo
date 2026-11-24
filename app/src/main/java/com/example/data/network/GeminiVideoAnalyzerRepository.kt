@@ -12,6 +12,7 @@ import com.example.data.model.LocalVideoInspection
 import com.example.data.model.PromptBlueprint
 import com.example.data.model.PromptUpgradePreset
 import com.example.data.model.TargetVideoGenerator
+import com.example.data.model.ThirdPartyModelCatalog
 import com.example.data.model.TranscriptLanguageMode
 import com.example.data.model.VideoAspectRatio
 import com.example.data.model.VideoTranscript
@@ -76,31 +77,23 @@ class GeminiVideoAnalyzerRepository(private val context: Context) {
                             lower.startsWith("gemini-") &&
                             !lower.contains("embedding") &&
                             !lower.contains("tts") &&
-                            !lower.contains("image") &&
+                            !lower.contains("-image") &&
+                            !lower.contains("imagen") &&
                             !lower.contains("robotics") &&
-                            !lower.contains("computer-use")
+                            !lower.contains("computer-use") &&
+                            !ThirdPartyModelCatalog.isDeprecatedGeminiModel(rawName)
                         if (isVideoCapableGemini) {
                             usableModels.add(rawName to displayName)
                         }
                     }
 
-                    val preferredOrder = listOf(
-                        "gemini-3.8-flash",
-                        "gemini-3.6-flash",
-                        "gemini-3-flash",
-                        "gemini-4-hydrogen",
-                        "gemini-2.5-flash",
-                        "gemini-3.5-flash-lite",
-                        "gemini-2.5-pro"
-                    )
-                    val recommended = preferredOrder.firstOrNull { pref ->
-                        usableModels.any { it.first == pref }
-                    } ?: usableModels.firstOrNull { it.first.contains("flash") }?.first
-                        ?: usableModels.firstOrNull()?.first
+                    val recommended = ThirdPartyModelCatalog.pickPreferredGeminiModel(
+                        availableIds = usableModels.map { it.first }
+                    ) ?: usableModels.firstOrNull()?.first
 
                     KeyVerificationResult(
                         isValid = true,
-                        message = "Connected! ${usableModels.size} Gemini models available on your key.",
+                        message = "Connected! ${usableModels.size} active Gemini models detected on your key.",
                         availableModels = usableModels,
                         recommendedModelId = recommended
                     )
@@ -125,7 +118,8 @@ class GeminiVideoAnalyzerRepository(private val context: Context) {
         aspectRatio: VideoAspectRatio,
         upgradePreset: PromptUpgradePreset,
         extraCreatorNotes: String,
-        onStageUpdate: (String) -> Unit
+        onStageUpdate: (String) -> Unit,
+        onModelAutoFallback: (String) -> Unit = {}
     ): Result<PromptBlueprint> = withContext(Dispatchers.IO) {
         val cleanKey = apiKey.trim()
         if (cleanKey.isBlank()) {
@@ -222,29 +216,21 @@ class GeminiVideoAnalyzerRepository(private val context: Context) {
                 })
             }
 
-            val responseJsonText = withTimeout(115_000L) {
-                val url = "$GEMINI_BASE/v1beta/models/${modelId.trim()}:generateContent?key=$cleanKey"
-                val req = Request.Builder()
-                    .url(url)
-                    .header("Content-Type", "application/json")
-                    .post(requestPayload.toString().toRequestBody("application/json".toMediaType()))
-                    .build()
-
-                client.newCall(req).execute().use { resp ->
-                    val rawBody = resp.body?.string().orEmpty()
-                    if (!resp.isSuccessful) {
-                        throw IllegalStateException(parseGeminiErrorMessage(rawBody, resp.code))
-                    }
-                    extractTextFromGeminiResponse(rawBody)
-                }
-            }
+            val (responseJsonText, actualModelUsed) = executeGenerateContentWithModelFallback(
+                apiKey = cleanKey,
+                initialModelId = modelId,
+                requestPayload = requestPayload,
+                timeoutMs = 115_000L,
+                onStageUpdate = onStageUpdate,
+                onModelAutoFallback = onModelAutoFallback
+            )
 
             val blueprint = PromptBlueprintSerializer.fromGeminiOrStoredJson(
                 jsonString = responseJsonText,
                 videoTitle = inspection.displayName,
                 sourceUriString = inspection.uriString,
                 targetGenerator = targetGenerator,
-                geminiModelUsed = modelId
+                geminiModelUsed = actualModelUsed
             )
 
             Result.success(blueprint)
@@ -266,7 +252,8 @@ class GeminiVideoAnalyzerRepository(private val context: Context) {
         modelId: String,
         inspection: LocalVideoInspection,
         languageMode: TranscriptLanguageMode,
-        onStageUpdate: (String) -> Unit
+        onStageUpdate: (String) -> Unit,
+        onModelAutoFallback: (String) -> Unit = {}
     ): Result<VideoTranscript> = withContext(Dispatchers.IO) {
         val cleanKey = apiKey.trim()
         if (cleanKey.isBlank()) {
@@ -319,6 +306,7 @@ class GeminiVideoAnalyzerRepository(private val context: Context) {
             val isChunked = windows.size > 1
             val chunkResults = mutableListOf<VideoTranscript>()
 
+            var activeModelId = modelId
             for ((index, window) in windows.withIndex()) {
                 val startLabel = TranscriptSerializer.formatClockTimestamp(window.first)
                 val endLabel = if (window.second > 0L) {
@@ -373,29 +361,22 @@ class GeminiVideoAnalyzerRepository(private val context: Context) {
                     })
                 }
 
-                val responseJsonText = withTimeout(180_000L) {
-                    val url = "$GEMINI_BASE/v1beta/models/${modelId.trim()}:generateContent?key=$cleanKey"
-                    val req = Request.Builder()
-                        .url(url)
-                        .header("Content-Type", "application/json")
-                        .post(requestPayload.toString().toRequestBody("application/json".toMediaType()))
-                        .build()
-
-                    client.newCall(req).execute().use { resp ->
-                        val rawBody = resp.body?.string().orEmpty()
-                        if (!resp.isSuccessful) {
-                            throw IllegalStateException(parseGeminiErrorMessage(rawBody, resp.code))
-                        }
-                        extractTextFromGeminiResponse(rawBody)
-                    }
-                }
+                val (responseJsonText, usedModel) = executeGenerateContentWithModelFallback(
+                    apiKey = cleanKey,
+                    initialModelId = activeModelId,
+                    requestPayload = requestPayload,
+                    timeoutMs = 180_000L,
+                    onStageUpdate = onStageUpdate,
+                    onModelAutoFallback = onModelAutoFallback
+                )
+                activeModelId = usedModel
 
                 chunkResults.add(
                     TranscriptSerializer.fromGeminiOrStoredJson(
                         jsonString = responseJsonText,
                         videoTitle = inspection.displayName,
                         sourceUriString = inspection.uriString,
-                        geminiModelUsed = modelId,
+                        geminiModelUsed = activeModelId,
                         languageMode = languageMode
                     )
                 )
@@ -408,7 +389,7 @@ class GeminiVideoAnalyzerRepository(private val context: Context) {
                     chunks = chunkResults,
                     videoTitle = inspection.displayName,
                     sourceUriString = inspection.uriString,
-                    geminiModelUsed = modelId,
+                    geminiModelUsed = activeModelId,
                     languageMode = languageMode
                 )
             }
@@ -432,7 +413,8 @@ class GeminiVideoAnalyzerRepository(private val context: Context) {
         modelId: String,
         inspection: LocalVideoInspection,
         sourceLanguage: DubSourceLanguage,
-        onStageUpdate: (String) -> Unit
+        onStageUpdate: (String) -> Unit,
+        onModelAutoFallback: (String) -> Unit = {}
     ): Result<List<DubLineItem>> = withContext(Dispatchers.IO) {
         val cleanKey = apiKey.trim()
         if (cleanKey.isBlank()) {
@@ -485,6 +467,7 @@ class GeminiVideoAnalyzerRepository(private val context: Context) {
             val isChunked = windows.size > 1
             val chunkLineLists = mutableListOf<List<DubLineItem>>()
             val discoveredRoster = linkedSetOf<String>()
+            var activeModelId = modelId
 
             for ((idx, window) in windows.withIndex()) {
                 val startLabel = TranscriptSerializer.formatClockTimestamp(window.first)
@@ -545,11 +528,15 @@ class GeminiVideoAnalyzerRepository(private val context: Context) {
                     })
                 }
 
-                val responseJsonText = executeChunkWithRetry(
+                val (responseJsonText, usedModel) = executeGenerateContentWithModelFallback(
                     apiKey = cleanKey,
-                    modelId = modelId,
-                    requestPayload = requestPayload
+                    initialModelId = activeModelId,
+                    requestPayload = requestPayload,
+                    timeoutMs = 180_000L,
+                    onStageUpdate = onStageUpdate,
+                    onModelAutoFallback = onModelAutoFallback
                 )
+                activeModelId = usedModel
 
                 val parsedObj = JSONObject(responseJsonText)
                 val segArr = parsedObj.optJSONArray("lines") ?: JSONArray()
@@ -605,15 +592,67 @@ class GeminiVideoAnalyzerRepository(private val context: Context) {
         }
     }
 
-    private suspend fun executeChunkWithRetry(
+    private class GeminiHttpException(
+        val statusCode: Int,
+        override val message: String
+    ) : IllegalStateException(message)
+
+    private suspend fun executeGenerateContentWithModelFallback(
+        apiKey: String,
+        initialModelId: String,
+        requestPayload: JSONObject,
+        timeoutMs: Long,
+        onStageUpdate: (String) -> Unit,
+        onModelAutoFallback: (String) -> Unit
+    ): Pair<String, String> {
+        val triedModels = linkedSetOf<String>()
+        var currentModel = initialModelId.trim().ifBlank { "gemini-3-flash-preview" }
+
+        for (modelAttempt in 0..3) {
+            triedModels.add(currentModel)
+            try {
+                val text = executeSingleModelWithTransientRetry(
+                    apiKey = apiKey,
+                    modelId = currentModel,
+                    requestPayload = requestPayload,
+                    timeoutMs = timeoutMs
+                )
+                return text to currentModel
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: GeminiHttpException) {
+                val lower = e.message.lowercase()
+                val isModelUnavailable = e.statusCode == 404 ||
+                    lower.contains("no longer available") ||
+                    lower.contains("not found for api version") ||
+                    lower.contains("is not supported for generatecontent")
+                if (!isModelUnavailable) {
+                    throw e
+                }
+                onStageUpdate("Model $currentModel unavailable (HTTP ${e.statusCode}), auto-detecting active Gemini model...")
+                val verifyRes = verifyApiKey(apiKey)
+                val nextModel = ThirdPartyModelCatalog.pickPreferredGeminiModel(
+                    availableIds = verifyRes.availableModels.map { it.first },
+                    excluding = triedModels
+                ) ?: throw e
+                currentModel = nextModel
+                onModelAutoFallback(nextModel)
+                onStageUpdate("Auto-switched to $nextModel — retrying...")
+            }
+        }
+        throw IllegalStateException("No active Gemini model succeeded for this request.")
+    }
+
+    private suspend fun executeSingleModelWithTransientRetry(
         apiKey: String,
         modelId: String,
-        requestPayload: JSONObject
+        requestPayload: JSONObject,
+        timeoutMs: Long
     ): String {
         var lastError: Exception? = null
         repeat(2) { attempt ->
             try {
-                return withTimeout(180_000L) {
+                return withTimeout(timeoutMs) {
                     val url = "$GEMINI_BASE/v1beta/models/${modelId.trim()}:generateContent?key=$apiKey"
                     val req = Request.Builder()
                         .url(url)
@@ -624,13 +663,22 @@ class GeminiVideoAnalyzerRepository(private val context: Context) {
                     client.newCall(req).execute().use { resp ->
                         val rawBody = resp.body?.string().orEmpty()
                         if (!resp.isSuccessful) {
-                            throw IllegalStateException(parseGeminiErrorMessage(rawBody, resp.code))
+                            throw GeminiHttpException(
+                                statusCode = resp.code,
+                                message = parseGeminiErrorMessage(rawBody, resp.code)
+                            )
                         }
                         extractTextFromGeminiResponse(rawBody)
                     }
                 }
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: GeminiHttpException) {
+                if (e.statusCode in 400..499 && e.statusCode != 429) {
+                    throw e
+                }
+                lastError = e
+                if (attempt == 0) delay(1200L)
             } catch (e: Exception) {
                 lastError = e
                 if (attempt == 0) delay(1200L)

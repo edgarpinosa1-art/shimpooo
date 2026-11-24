@@ -370,6 +370,7 @@ fun ReelForgeApp(
                             downloaderState = downloaderState,
                             recentClips = downloadedClips,
                             hasApiKey = settings.hasApiKey,
+                            providerLabel = settings.activeProvider.shortBadge,
                             onUrlChanged = viewModel::updateUrlInput,
                             onClearUrl = viewModel::clearDownloader,
                             onExtractClick = viewModel::extractVideoFromUrl,
@@ -531,8 +532,11 @@ fun ReelForgeApp(
         ApiKeyConfigBottomSheet(
             settings = settings,
             checkState = apiKeyCheckState,
-            onSaveAndVerifyKey = viewModel::saveAndVerifyApiKey,
-            onSelectModel = viewModel::saveGeminiModel,
+            onSelectProvider = viewModel::saveActiveProvider,
+            onSaveAndVerifyConfig = viewModel::saveAndVerifyProviderConfig,
+            onSelectGeminiModel = viewModel::saveGeminiModel,
+            onSelectSttModel = viewModel::saveSelectedSttModel,
+            onSelectChatModel = viewModel::saveSelectedChatModel,
             onSaveCustomCobaltUrl = viewModel::saveCustomCobaltUrl,
             onDismiss = { showApiKeySheet = false }
         )

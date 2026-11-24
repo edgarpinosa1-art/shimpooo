@@ -1,6 +1,9 @@
 package com.example.data.dubbing
 
 import android.content.Context
+import com.example.data.local.SettingsDataStore
+import com.example.data.local.UserSettings
+import com.example.data.model.AiProvider
 import com.example.data.model.DubAudioDuckingMode
 import com.example.data.model.DubSourceLanguage
 import com.example.data.model.DubVoiceEngine
@@ -8,6 +11,7 @@ import com.example.data.model.LocalVideoInspection
 import com.example.data.model.MmsModelStatus
 import com.example.data.model.VideoTranscript
 import com.example.data.network.GeminiVideoAnalyzerRepository
+import com.example.data.network.ThirdPartyAiRepository
 import com.example.ui.DubRenderUiState
 import com.example.ui.DubScriptUiState
 import com.example.ui.DubberPanelState
@@ -32,6 +36,8 @@ class DubbingJobCoordinator private constructor(private val appContext: Context)
     val androidTts = AndroidTtsSynthesizer(appContext)
     private val videoDubber = VideoDubberEngine(appContext, mmsOnnxEngine, androidTts)
     private val geminiAnalyzer = GeminiVideoAnalyzerRepository(appContext)
+    private val thirdPartyAi = ThirdPartyAiRepository(appContext)
+    private val settingsStore = SettingsDataStore(appContext)
 
     private val _state = MutableStateFlow(DubberPanelState())
     val state: StateFlow<DubberPanelState> = _state.asStateFlow()
@@ -220,8 +226,7 @@ class DubbingJobCoordinator private constructor(private val appContext: Context)
 
     fun generateFilipinoDubScript(
         inspection: LocalVideoInspection?,
-        apiKey: String,
-        modelId: String
+        settings: UserSettings
     ) {
         if (_state.value.scriptState is DubScriptUiState.Generating) return
         if (inspection == null) {
@@ -230,41 +235,67 @@ class DubbingJobCoordinator private constructor(private val appContext: Context)
             )
             return
         }
-        if (apiKey.isBlank()) {
+        if (!settings.hasApiKey) {
             _state.value = _state.value.copy(
-                scriptState = DubScriptUiState.Error("Ilagay muna ang iyong Gemini API key (free tier) o i-import ang .SRT offline.")
+                scriptState = DubScriptUiState.Error(
+                    "Ilagay muna ang iyong ${settings.activeProvider.shortBadge} API key sa settings, o i-import ang .SRT offline."
+                )
             )
             return
         }
         scope.launch {
             _state.value = _state.value.copy(
-                scriptState = DubScriptUiState.Generating("Preparing video for lip-timed translation...")
+                scriptState = DubScriptUiState.Generating("Preparing video via ${settings.activeProvider.shortBadge}...")
             )
             DubbingForegroundService.startOrUpdate(
                 context = appContext,
-                title = "Translating to Filipino",
+                title = "Translating to Filipino (${settings.activeProvider.shortBadge})",
                 message = "Preparing ${inspection.displayName}...",
                 progressPercent = null
             )
 
             try {
-                val result = geminiAnalyzer.generateIsochronicFilipinoDubScript(
-                    apiKey = apiKey,
-                    modelId = modelId,
-                    inspection = inspection,
-                    sourceLanguage = _state.value.sourceLanguage,
-                    onStageUpdate = { stage ->
-                        _state.value = _state.value.copy(
-                            scriptState = DubScriptUiState.Generating(stage)
-                        )
-                        DubbingForegroundService.startOrUpdate(
-                            context = appContext,
-                            title = "Translating to Filipino",
-                            message = stage,
-                            progressPercent = null
-                        )
-                    }
-                )
+                val onStage: (String) -> Unit = { stage ->
+                    _state.value = _state.value.copy(
+                        scriptState = DubScriptUiState.Generating(stage)
+                    )
+                    DubbingForegroundService.startOrUpdate(
+                        context = appContext,
+                        title = "Translating to Filipino",
+                        message = stage,
+                        progressPercent = null
+                    )
+                }
+
+                val result = if (settings.activeProvider == AiProvider.GEMINI) {
+                    geminiAnalyzer.generateIsochronicFilipinoDubScript(
+                        apiKey = settings.geminiApiKey,
+                        modelId = settings.selectedGeminiModel,
+                        inspection = inspection,
+                        sourceLanguage = _state.value.sourceLanguage,
+                        onStageUpdate = onStage,
+                        onModelAutoFallback = { fallbackModel ->
+                            scope.launch { settingsStore.saveGeminiModel(fallbackModel) }
+                        }
+                    )
+                } else {
+                    thirdPartyAi.generateIsochronicFilipinoDubScriptWithThirdParty(
+                        provider = settings.activeProvider,
+                        apiKey = settings.thirdPartyApiKey,
+                        baseUrl = settings.effectiveThirdPartyBaseUrl,
+                        sttModelId = settings.selectedSttModel,
+                        chatModelId = settings.selectedChatModel,
+                        inspection = inspection,
+                        sourceLanguage = _state.value.sourceLanguage,
+                        onStageUpdate = onStage,
+                        onModelsAutoUpdated = { newStt, newChat ->
+                            scope.launch {
+                                if (!newStt.isNullOrBlank()) settingsStore.saveSelectedSttModel(newStt)
+                                if (!newChat.isNullOrBlank()) settingsStore.saveSelectedChatModel(newChat)
+                            }
+                        }
+                    )
+                }
                 result.fold(
                     onSuccess = { lines ->
                         val cur = _state.value

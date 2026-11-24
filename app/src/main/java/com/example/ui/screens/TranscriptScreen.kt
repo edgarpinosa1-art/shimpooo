@@ -138,6 +138,7 @@ fun TranscriptScreen(
                     title = stringResource(R.string.transcript_headline),
                     subtitle = stringResource(R.string.transcript_subtitle),
                     hasApiKey = settings.hasApiKey,
+                    providerLabel = settings.activeProvider.shortBadge,
                     onOpenKeySheet = onOpenKeySheet
                 )
             }

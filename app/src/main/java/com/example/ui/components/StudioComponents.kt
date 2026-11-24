@@ -79,7 +79,10 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.R
 import com.example.data.local.UserSettings
+import com.example.data.model.AiProvider
+import com.example.data.model.ModelCapabilityTag
 import com.example.data.model.SocialPlatform
+import com.example.data.model.ThirdPartyModelCatalog
 import com.example.ui.ApiKeyCheckState
 import com.example.ui.theme.StudioBorder
 import com.example.ui.theme.StudioCoral
@@ -128,7 +131,8 @@ fun StudioTopHeader(
     subtitle: String,
     hasApiKey: Boolean,
     onOpenKeySheet: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    providerLabel: String = "Gemini"
 ) {
     Box(
         modifier = modifier
@@ -203,12 +207,12 @@ fun StudioTopHeader(
                     ) {
                         Icon(
                             imageVector = if (hasApiKey) Icons.Filled.CheckCircle else Icons.Filled.Key,
-                            contentDescription = "Manage Gemini API key",
+                            contentDescription = "Manage AI API key",
                             tint = if (hasApiKey) StudioEmerald else StudioCoral,
                             modifier = Modifier.size(15.dp)
                         )
                         Text(
-                            text = if (hasApiKey) "Gemini Key Ready" else "Set Gemini Key",
+                            text = if (hasApiKey) "$providerLabel Ready" else "Set AI Key",
                             style = MaterialTheme.typography.labelSmall,
                             color = if (hasApiKey) StudioEmerald else StudioCoral
                         )
@@ -364,21 +368,45 @@ fun CopyablePromptBlock(
 fun ApiKeyConfigBottomSheet(
     settings: UserSettings,
     checkState: ApiKeyCheckState,
-    onSaveAndVerifyKey: (String) -> Unit,
-    onSelectModel: (String) -> Unit,
+    onSelectProvider: (AiProvider) -> Unit,
+    onSaveAndVerifyConfig: (provider: AiProvider, key: String, baseUrl: String) -> Unit,
+    onSelectGeminiModel: (String) -> Unit,
+    onSelectSttModel: (String) -> Unit,
+    onSelectChatModel: (String) -> Unit,
     onSaveCustomCobaltUrl: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var keyDraft by remember(settings.geminiApiKey) { mutableStateOf(settings.geminiApiKey) }
-    var customModelDraft by remember(settings.selectedGeminiModel) {
+
+    var providerDraft by remember(settings.activeProvider) { mutableStateOf(settings.activeProvider) }
+    var geminiKeyDraft by remember(settings.geminiApiKey) { mutableStateOf(settings.geminiApiKey) }
+    var thirdPartyKeyDraft by remember(settings.thirdPartyApiKey) { mutableStateOf(settings.thirdPartyApiKey) }
+    var baseUrlDraft by remember(settings.activeProvider, settings.thirdPartyBaseUrl) {
+        mutableStateOf(
+            if (settings.activeProvider == AiProvider.CUSTOM_OPENAI) {
+                settings.thirdPartyBaseUrl
+            } else {
+                settings.activeProvider.defaultBaseUrl
+            }
+        )
+    }
+
+    var geminiModelDraft by remember(settings.selectedGeminiModel) {
         mutableStateOf(settings.selectedGeminiModel)
+    }
+    var sttModelDraft by remember(settings.selectedSttModel) {
+        mutableStateOf(settings.selectedSttModel)
+    }
+    var chatModelDraft by remember(settings.selectedChatModel) {
+        mutableStateOf(settings.selectedChatModel)
     }
     var cobaltDraft by remember(settings.customCobaltUrl) {
         mutableStateOf(settings.customCobaltUrl)
     }
     var showKey by remember { mutableStateOf(false) }
+
+    val activeKeyDraft = if (providerDraft == AiProvider.GEMINI) geminiKeyDraft else thirdPartyKeyDraft
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -409,7 +437,7 @@ fun ApiKeyConfigBottomSheet(
                         tint = StudioCyan
                     )
                     Text(
-                        text = "Gemini API Key & Engine",
+                        text = "AI Provider, Key & Models",
                         style = MaterialTheme.typography.titleLarge,
                         color = StudioTextPrimary
                     )
@@ -420,16 +448,96 @@ fun ApiKeyConfigBottomSheet(
             }
 
             Text(
-                text = "Stored privately on your device via DataStore. Paste your Gemini API key from Google AI Studio to analyze full videos and extract 100% enhanced prompts.",
-                style = MaterialTheme.typography.bodyMedium,
+                text = "Pwedeng Gemini o 3rd-party API (Groq free tier, OpenAI, OpenRouter, o Custom URL). Automatic na ide-detect ng app ang lahat ng available Audio STT at Translator models ng key mo.",
+                style = MaterialTheme.typography.bodySmall,
                 color = StudioTextSecondary
             )
 
+            Text(
+                text = "1. Select AI Provider",
+                style = MaterialTheme.typography.titleMedium,
+                color = StudioTextPrimary
+            )
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                AiProvider.entries.forEach { provider ->
+                    val selected = providerDraft == provider
+                    FilterChip(
+                        selected = selected,
+                        onClick = {
+                            providerDraft = provider
+                            if (provider != AiProvider.GEMINI) {
+                                baseUrlDraft = if (provider == AiProvider.CUSTOM_OPENAI) {
+                                    settings.thirdPartyBaseUrl
+                                } else {
+                                    provider.defaultBaseUrl
+                                }
+                                // Set sensible defaults for that provider if draft still points to another provider
+                                if (provider == AiProvider.GROQ && !sttModelDraft.contains("whisper")) {
+                                    sttModelDraft = "whisper-large-v3-turbo"
+                                    onSelectSttModel("whisper-large-v3-turbo")
+                                }
+                                if (provider == AiProvider.OPENROUTER) {
+                                    sttModelDraft = "google/gemini-2.5-flash"
+                                    chatModelDraft = "google/gemini-2.5-flash"
+                                    onSelectSttModel("google/gemini-2.5-flash")
+                                    onSelectChatModel("google/gemini-2.5-flash")
+                                }
+                            }
+                            onSelectProvider(provider)
+                        },
+                        label = { Text(provider.displayName, style = MaterialTheme.typography.bodySmall) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = StudioCyan.copy(alpha = 0.22f),
+                            selectedLabelColor = StudioCyan
+                        ),
+                        modifier = Modifier.testTag("provider_chip_${provider.name}")
+                    )
+                }
+            }
+
+            Text(
+                text = providerDraft.subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = StudioCyan
+            )
+
+            if (providerDraft.isThirdParty) {
+                OutlinedTextField(
+                    value = baseUrlDraft,
+                    onValueChange = { baseUrlDraft = it },
+                    enabled = providerDraft == AiProvider.CUSTOM_OPENAI,
+                    label = { Text("API Base URL") },
+                    placeholder = { Text("https://api.example.com/openai/v1") },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = StudioCyan,
+                        unfocusedBorderColor = StudioBorder,
+                        focusedLabelColor = StudioCyan,
+                        cursorColor = StudioCyan
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("third_party_base_url_input")
+                )
+            }
+
             OutlinedTextField(
-                value = keyDraft,
-                onValueChange = { keyDraft = it },
-                label = { Text("Gemini API Key (AIza...)") },
-                placeholder = { Text("Paste your Gemini API key") },
+                value = activeKeyDraft,
+                onValueChange = { newVal ->
+                    if (providerDraft == AiProvider.GEMINI) {
+                        geminiKeyDraft = newVal
+                    } else {
+                        thirdPartyKeyDraft = newVal
+                    }
+                },
+                label = { Text(providerDraft.keyHintLabel) },
+                placeholder = { Text(providerDraft.keyPlaceholder) },
                 singleLine = true,
                 visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(
@@ -440,7 +548,13 @@ fun ApiKeyConfigBottomSheet(
                     Row {
                         IconButton(
                             onClick = {
-                                readClipboardText(context)?.let { keyDraft = it.trim() }
+                                readClipboardText(context)?.trim()?.let { pasted ->
+                                    if (providerDraft == AiProvider.GEMINI) {
+                                        geminiKeyDraft = pasted
+                                    } else {
+                                        thirdPartyKeyDraft = pasted
+                                    }
+                                }
                             },
                             modifier = Modifier.testTag("paste_api_key_button")
                         ) {
@@ -478,7 +592,9 @@ fun ApiKeyConfigBottomSheet(
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Button(
-                    onClick = { onSaveAndVerifyKey(keyDraft) },
+                    onClick = {
+                        onSaveAndVerifyConfig(providerDraft, activeKeyDraft, baseUrlDraft)
+                    },
                     enabled = checkState !is ApiKeyCheckState.Verifying,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = StudioCyan,
@@ -496,17 +612,21 @@ fun ApiKeyConfigBottomSheet(
                             color = StudioObsidian
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Verifying...")
+                        Text("Detecting Models...")
                     } else {
-                        Text("Verify & Save Key", style = MaterialTheme.typography.labelLarge)
+                        Text("Verify & Detect Models", style = MaterialTheme.typography.labelLarge)
                     }
                 }
 
-                if (keyDraft.isNotBlank()) {
+                if (activeKeyDraft.isNotBlank()) {
                     OutlinedButton(
                         onClick = {
-                            keyDraft = ""
-                            onSaveAndVerifyKey("")
+                            if (providerDraft == AiProvider.GEMINI) {
+                                geminiKeyDraft = ""
+                            } else {
+                                thirdPartyKeyDraft = ""
+                            }
+                            onSaveAndVerifyConfig(providerDraft, "", baseUrlDraft)
                         },
                         border = BorderStroke(1.dp, StudioBorder),
                         modifier = Modifier
@@ -552,57 +672,189 @@ fun ApiKeyConfigBottomSheet(
                 else -> Unit
             }
 
-            Text(
-                text = "Gemini Model",
-                style = MaterialTheme.typography.titleMedium,
-                color = StudioTextPrimary
-            )
+            if (providerDraft == AiProvider.GEMINI) {
+                Text(
+                    text = "2. Active Gemini Model",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = StudioTextPrimary
+                )
 
-            val modelOptions = (checkState as? ApiKeyCheckState.Valid)
-                ?.liveModels
-                ?.takeIf { it.isNotEmpty() }
-                ?: UserSettings.AVAILABLE_MODELS
+                val geminiOptions = (checkState as? ApiKeyCheckState.Valid)
+                    ?.takeIf { it.provider == AiProvider.GEMINI && it.liveModels.isNotEmpty() }
+                    ?.liveModels
+                    ?: UserSettings.AVAILABLE_MODELS
 
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                modelOptions.forEach { (modelId, label) ->
-                    val selected = customModelDraft == modelId
-                    FilterChip(
-                        selected = selected,
-                        onClick = {
-                            customModelDraft = modelId
-                            onSelectModel(modelId)
-                        },
-                        label = { Text(label, style = MaterialTheme.typography.bodySmall) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = StudioCyan.copy(alpha = 0.2f),
-                            selectedLabelColor = StudioCyan
-                        ),
-                        modifier = Modifier.testTag("model_chip_$modelId")
-                    )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    geminiOptions.forEach { (modelId, label) ->
+                        val selected = geminiModelDraft == modelId
+                        FilterChip(
+                            selected = selected,
+                            onClick = {
+                                geminiModelDraft = modelId
+                                onSelectGeminiModel(modelId)
+                            },
+                            label = { Text(label, style = MaterialTheme.typography.bodySmall) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = StudioCyan.copy(alpha = 0.2f),
+                                selectedLabelColor = StudioCyan
+                            ),
+                            modifier = Modifier.testTag("model_chip_$modelId")
+                        )
+                    }
                 }
-            }
 
-            OutlinedTextField(
-                value = customModelDraft,
-                onValueChange = {
-                    customModelDraft = it
-                    onSelectModel(it)
-                },
-                label = { Text("Active Model ID") },
-                singleLine = true,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = StudioCyan,
-                    unfocusedBorderColor = StudioBorder
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("custom_model_id_input")
-            )
+                OutlinedTextField(
+                    value = geminiModelDraft,
+                    onValueChange = {
+                        geminiModelDraft = it
+                        onSelectGeminiModel(it)
+                    },
+                    label = { Text("Active Gemini Model ID") },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = StudioCyan,
+                        unfocusedBorderColor = StudioBorder
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("custom_model_id_input")
+                )
+            } else {
+                val detected = (checkState as? ApiKeyCheckState.Valid)
+                    ?.takeIf { it.provider == providerDraft }
+                    ?.detectedModels
+                    .orEmpty()
+
+                val sttOptions = detected.filter {
+                    it.capability == ModelCapabilityTag.AUDIO_STT ||
+                        it.capability == ModelCapabilityTag.MULTIMODAL_AUDIO
+                }.ifEmpty {
+                    when (providerDraft) {
+                        AiProvider.GROQ -> ThirdPartyModelCatalog.GROQ_DEFAULT_STT_MODELS
+                        AiProvider.OPENAI -> ThirdPartyModelCatalog.OPENAI_DEFAULT_STT_MODELS
+                        AiProvider.OPENROUTER -> ThirdPartyModelCatalog.OPENROUTER_DEFAULT_CHAT_MODELS
+                        else -> ThirdPartyModelCatalog.GROQ_DEFAULT_STT_MODELS
+                    }
+                }
+
+                val chatOptions = detected.filter {
+                    it.capability != ModelCapabilityTag.AUDIO_STT
+                }.ifEmpty {
+                    when (providerDraft) {
+                        AiProvider.GROQ -> ThirdPartyModelCatalog.GROQ_DEFAULT_CHAT_MODELS
+                        AiProvider.OPENAI -> ThirdPartyModelCatalog.OPENAI_DEFAULT_CHAT_MODELS
+                        AiProvider.OPENROUTER -> ThirdPartyModelCatalog.OPENROUTER_DEFAULT_CHAT_MODELS
+                        else -> ThirdPartyModelCatalog.OPENAI_DEFAULT_CHAT_MODELS
+                    }
+                }
+
+                Text(
+                    text = "2. Audio Transcript Model (STT)",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = StudioTextPrimary
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    sttOptions.forEach { m ->
+                        val selected = sttModelDraft == m.id
+                        FilterChip(
+                            selected = selected,
+                            onClick = {
+                                sttModelDraft = m.id
+                                onSelectSttModel(m.id)
+                            },
+                            label = {
+                                Text(
+                                    text = "${m.id} · ${m.capability.badge}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = StudioEmerald.copy(alpha = 0.22f),
+                                selectedLabelColor = StudioEmerald
+                            ),
+                            modifier = Modifier.testTag("stt_model_chip_${m.id}")
+                        )
+                    }
+                }
+
+                OutlinedTextField(
+                    value = sttModelDraft,
+                    onValueChange = {
+                        sttModelDraft = it
+                        onSelectSttModel(it)
+                    },
+                    label = { Text("Active STT / Audio Model ID") },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = StudioEmerald,
+                        unfocusedBorderColor = StudioBorder
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("custom_stt_model_id_input")
+                )
+
+                Text(
+                    text = "3. Filipino Translator & Chat Model",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = StudioTextPrimary
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    chatOptions.take(25).forEach { m ->
+                        val selected = chatModelDraft == m.id
+                        FilterChip(
+                            selected = selected,
+                            onClick = {
+                                chatModelDraft = m.id
+                                onSelectChatModel(m.id)
+                            },
+                            label = {
+                                Text(
+                                    text = "${m.id} · ${m.capability.badge}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = StudioCyan.copy(alpha = 0.22f),
+                                selectedLabelColor = StudioCyan
+                            ),
+                            modifier = Modifier.testTag("chat_model_chip_${m.id}")
+                        )
+                    }
+                }
+
+                OutlinedTextField(
+                    value = chatModelDraft,
+                    onValueChange = {
+                        chatModelDraft = it
+                        onSelectChatModel(it)
+                    },
+                    label = { Text("Active Translator / Chat Model ID") },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = StudioCyan,
+                        unfocusedBorderColor = StudioBorder
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("custom_chat_model_id_input")
+                )
+            }
 
             Text(
                 text = "Optional: Self-Hosted Cobalt Instance URL",

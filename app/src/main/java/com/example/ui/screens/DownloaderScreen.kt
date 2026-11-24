@@ -100,6 +100,7 @@ fun DownloaderScreen(
     downloaderState: DownloaderUiState,
     recentClips: List<DownloadedClipEntity>,
     hasApiKey: Boolean,
+    providerLabel: String = "Gemini",
     onUrlChanged: (String) -> Unit,
     onClearUrl: () -> Unit,
     onExtractClick: () -> Unit,
@@ -131,6 +132,7 @@ fun DownloaderScreen(
                     title = stringResource(R.string.downloader_headline),
                     subtitle = stringResource(R.string.downloader_subtitle),
                     hasApiKey = hasApiKey,
+                    providerLabel = providerLabel,
                     onOpenKeySheet = onOpenKeySheet
                 )
             }

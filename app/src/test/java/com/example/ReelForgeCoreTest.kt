@@ -18,8 +18,13 @@ import com.example.data.dubbing.DubTimelineMath
 import com.example.data.dubbing.MmsTagalogOnnxEngine
 import com.example.data.dubbing.TimedPcmClip
 import com.example.data.dubbing.WavPcmTools
+import com.example.data.model.AiProvider
+import com.example.data.model.ModelCapabilityTag
+import com.example.data.model.ThirdPartyModelCatalog
+import com.example.data.network.ThirdPartyTranscriptHelper
 import com.example.data.network.YouTubeExtractorHelper
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -617,5 +622,116 @@ class ReelForgeCoreTest {
         )
         assertTrue(combined.size in (sampleRate * 0.65).toInt()..(sampleRate * 0.92).toInt())
     }
+
+    @Test
+    fun thirdPartyModelsCatalogDetectsSttChatVisionAndFiltersUnsafeOrTtsModels() {
+        val groqModelsJson = """
+            {
+              "object": "list",
+              "data": [
+                { "id": "whisper-large-v3-turbo", "object": "model" },
+                { "id": "whisper-large-v3", "object": "model" },
+                { "id": "llama-3.3-70b-versatile", "object": "model" },
+                { "id": "meta-llama/llama-4-scout-17b-16e-instruct", "object": "model" },
+                { "id": "llama-guard-3-8b", "object": "model" },
+                { "id": "playai-tts", "object": "model" }
+              ]
+            }
+        """.trimIndent()
+
+        val res = ThirdPartyModelCatalog.parseOpenAiModelsJson(
+            jsonBody = groqModelsJson,
+            provider = AiProvider.GROQ,
+            resolvedBaseUrl = "https://api.groq.com/openai/v1"
+        )
+        assertTrue(res.isValid)
+        assertEquals(4, res.allModels.size)
+        assertFalse(res.allModels.any { it.id.contains("guard") || it.id.contains("tts") })
+        assertEquals("whisper-large-v3-turbo", res.recommendedSttModel)
+        assertEquals("llama-3.3-70b-versatile", res.recommendedChatModel)
+        assertEquals("meta-llama/llama-4-scout-17b-16e-instruct", res.recommendedVisionModel)
+        assertEquals(
+            ModelCapabilityTag.AUDIO_STT,
+            res.allModels.first { it.id == "whisper-large-v3-turbo" }.capability
+        )
+        assertEquals(
+            ModelCapabilityTag.VISION_CHAT,
+            res.allModels.first { it.id == "meta-llama/llama-4-scout-17b-16e-instruct" }.capability
+        )
+    }
+
+    @Test
+    fun geminiModelSelectionSkipsRetired25ProAndPicksActiveModels() {
+        assertTrue(ThirdPartyModelCatalog.isDeprecatedGeminiModel("gemini-2.5-pro"))
+        assertTrue(ThirdPartyModelCatalog.isDeprecatedGeminiModel("gemini-1.5-pro"))
+        assertFalse(ThirdPartyModelCatalog.isDeprecatedGeminiModel("gemini-3-flash-preview"))
+        assertFalse(ThirdPartyModelCatalog.isDeprecatedGeminiModel("gemini-3.1-pro-preview"))
+
+        val picked = ThirdPartyModelCatalog.pickPreferredGeminiModel(
+            availableIds = listOf("gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.1-pro-preview")
+        )
+        assertEquals("gemini-2.5-flash", picked)
+
+        val fallback = ThirdPartyModelCatalog.pickPreferredGeminiModel(
+            availableIds = listOf("gemini-2.5-pro", "gemini-3.1-pro-preview"),
+            excluding = setOf("gemini-2.5-pro")
+        )
+        assertEquals("gemini-3.1-pro-preview", fallback)
+    }
+
+    @Test
+    fun whisperVerboseJsonAndChunkOffsetPreserveGlobalVideoTimestamps() {
+        val verboseJson = """
+            {
+              "language": "english",
+              "text": "Welcome back everyone. Let's test this audio.",
+              "segments": [
+                { "id": 0, "start": 1.25, "end": 3.50, "text": " Welcome back everyone." },
+                { "id": 1, "start": 3.80, "end": 6.10, "text": " Let's test this audio." }
+              ]
+            }
+        """.trimIndent()
+
+        val parsed = ThirdPartyModelCatalog.parseWhisperVerboseJson(verboseJson)
+        assertEquals("english", parsed.detectedLanguage)
+        assertEquals(2, parsed.segments.size)
+
+        // Chunk 2 starts at 6 minutes (360_000 ms)
+        val global = ThirdPartyTranscriptHelper.flattenChunkToGlobalSegments(
+            chunk = parsed,
+            startOffsetMs = 360_000L,
+            chunkDurationMs = 120_000L,
+            startingIndex = 45
+        )
+        assertEquals(2, global.size)
+        assertEquals(45, global[0].index)
+        assertEquals(361_250L, global[0].startMs)
+        assertEquals(363_500L, global[0].endMs)
+        assertEquals("Welcome back everyone.", global[0].text)
+        assertEquals(363_800L, global[1].startMs)
+        assertEquals(366_100L, global[1].endMs)
+    }
+
+    @Test
+    fun openAiChatExtractorStripsMarkdownFencesCleanly() {
+        val response = """
+            {
+              "choices": [
+                {
+                  "message": {
+                    "role": "assistant",
+                    "content": "```json\n{\"lines\":[{\"index\":1,\"speaker\":\"Host\",\"filipinoText\":\"Kamusta kayo!\"}]}\n```"
+                  }
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val extracted = ThirdPartyModelCatalog.extractOpenAiChatContent(response)
+        assertTrue(extracted.startsWith("{"))
+        assertTrue(extracted.endsWith("}"))
+        assertTrue(extracted.contains("Kamusta kayo!"))
+    }
 }
+
 
