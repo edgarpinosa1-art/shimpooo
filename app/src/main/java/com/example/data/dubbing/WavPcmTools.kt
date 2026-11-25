@@ -153,11 +153,108 @@ object WavPcmTools {
         return out
     }
 
+    /**
+     * 4-tap Catmull-Rom cubic interpolation for clean vocal upsampling (16kHz / 22kHz -> 44.1kHz)
+     * without the harsh metallic aliasing caused by linear upsampling.
+     */
+    fun resampleMonoCubic(samples: ShortArray, srcRate: Int, dstRate: Int): ShortArray {
+        if (samples.size < 4 || srcRate == dstRate || srcRate <= 0 || dstRate <= 0) {
+            return resampleMonoLinear(samples, srcRate, dstRate)
+        }
+        val outLen = ((samples.size.toLong() * dstRate.toLong()) / srcRate.toLong()).toInt().coerceAtLeast(1)
+        val out = ShortArray(outLen)
+        val step = srcRate.toDouble() / dstRate.toDouble()
+        val last = samples.lastIndex
+
+        for (i in 0 until outLen) {
+            val pos = i * step
+            val p1 = pos.toInt().coerceIn(0, last)
+            val t = (pos - p1).toFloat()
+            val p0 = (p1 - 1).coerceAtLeast(0)
+            val p2 = (p1 + 1).coerceAtMost(last)
+            val p3 = (p1 + 2).coerceAtMost(last)
+
+            val y0 = samples[p0].toFloat()
+            val y1 = samples[p1].toFloat()
+            val y2 = samples[p2].toFloat()
+            val y3 = samples[p3].toFloat()
+
+            val t2 = t * t
+            val t3 = t2 * t
+            val valFloat = 0.5f * (
+                (2f * y1) +
+                    (-y0 + y2) * t +
+                    (2f * y0 - 5f * y1 + 4f * y2 - y3) * t2 +
+                    (-y0 + 3f * y1 - 3f * y2 + y3) * t3
+                )
+            out[i] = valFloat.roundToInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+        }
+        return out
+    }
+
+    /**
+     * Broadcast studio vocal mastering chain:
+     * 1) 85Hz high-pass filter to remove sub-rumble / DC thump
+     * 2) Optional gentle ~6.8kHz warmth low-pass for 16kHz VITS/MMS neural synthesis to tame digital buzz
+     * 3) Gentle RMS vocal loudness leveling + soft limiter so dialogue sits punchy & clear over BGM
+     */
+    fun masterDubVoiceClip(
+        samples: ShortArray,
+        sampleRate: Int,
+        applyDeBuzzFilter: Boolean = false
+    ): ShortArray {
+        if (samples.size < 64) return samples
+
+        val f = FloatArray(samples.size) { samples[it].toFloat() / 32768f }
+
+        // 1) 85Hz 1st-order high-pass filter
+        val rcHp = 1.0f / (2.0f * Math.PI.toFloat() * 85f)
+        val dt = 1.0f / sampleRate.toFloat()
+        val alphaHp = rcHp / (rcHp + dt)
+        var prevX = f[0]
+        var prevY = 0f
+        for (i in f.indices) {
+            val x = f[i]
+            val y = alphaHp * (prevY + x - prevX)
+            prevX = x
+            prevY = y
+            f[i] = y
+        }
+
+        // 2) Warm low-pass (~7.0kHz) to polish 16kHz neural TTS buzz
+        if (applyDeBuzzFilter) {
+            val rcLp = 1.0f / (2.0f * Math.PI.toFloat() * 7000f)
+            val alphaLp = dt / (rcLp + dt)
+            var lp = f[0]
+            for (i in f.indices) {
+                lp += alphaLp * (f[i] - lp)
+                f[i] = lp
+            }
+        }
+
+        // 3) Measure active speech RMS (ignoring silent frames) for consistent vocal loudness
+        var energySum = 0.0
+        var activeCount = 0
+        for (v in f) {
+            if (abs(v) > 0.015f) {
+                energySum += v * v
+                activeCount++
+            }
+        }
+        val rms = if (activeCount > 32) kotlin.math.sqrt(energySum / activeCount).toFloat() else 0f
+        val targetRms = 0.21f
+        val gain = if (rms > 0.005f) (targetRms / rms).coerceIn(0.65f, 2.6f) else 1.0f
+
+        return ShortArray(f.size) { idx ->
+            softClipSample(f[idx] * gain)
+        }
+    }
+
     fun trimDigitalSilence(
         samples: ShortArray,
         sampleRate: Int,
         threshold: Int = 220,
-        padMs: Int = 20
+        padMs: Int = 24
     ): ShortArray {
         if (samples.isEmpty()) return samples
         var first = -1
@@ -187,9 +284,9 @@ object WavPcmTools {
      */
     fun wsolaTimeScale(samples: ShortArray, sampleRate: Int, speedFactor: Float): ShortArray {
         if (samples.size < 1024 || abs(speedFactor - 1.0f) < 0.03f) return samples
-        val clampedSpeed = speedFactor.coerceIn(0.75f, 1.55f)
+        val clampedSpeed = speedFactor.coerceIn(0.80f, 1.38f)
 
-        val winSize = ((sampleRate * 0.040f).roundToInt() and 0xFFFE).coerceIn(512, 4096)
+        val winSize = ((sampleRate * 0.044f).roundToInt() and 0xFFFE).coerceIn(512, 4096)
         val halfWin = winSize / 2
         val synthesisHop = halfWin
         val analysisHop = (synthesisHop * clampedSpeed).roundToInt().coerceAtLeast(64)
@@ -206,7 +303,6 @@ object WavPcmTools {
         var inPos = 0
         var outPos = 0
 
-        // Copy first window directly
         val firstCopy = min(winSize, samples.size)
         for (i in 0 until firstCopy) {
             outAccum[i] += samples[i] * hann[i]
@@ -216,10 +312,8 @@ object WavPcmTools {
         inPos += analysisHop
 
         while (inPos + winSize < samples.size && outPos + winSize < estimatedOutLen) {
-            // Find best correlation offset near expected inPos to avoid phase discontinuities
             var bestOffset = 0
             var bestScore = Float.NEGATIVE_INFINITY
-            val overlapCheckStart = (outPos - synthesisHop).coerceAtLeast(0)
             val compareLen = min(halfWin, samples.size - inPos)
 
             val minDelta = (-searchRadius).coerceAtLeast(-inPos)
@@ -234,7 +328,7 @@ object WavPcmTools {
                     val existing = outAccum[outPos + k]
                     val candidate = samples[candStart + k].toFloat()
                     corr += existing * candidate
-                    k += 4 // stride 4 for crisp mobile speed
+                    k += 4
                 }
                 if (corr > bestScore) {
                     bestScore = corr
@@ -262,89 +356,52 @@ object WavPcmTools {
         }
     }
 
+    data class DuckingFilterState(var currentGain: Float = 1.0f)
+
+    data class VocalStripFilterState(
+        var midBassLp: Float = 0f,
+        var sideEnergySmooth: Float = 0f,
+        var midHighEnergySmooth: Float = 0f
+    )
+
     /**
-     * Mixes time-aligned Filipino dubbed clips onto original background audio with smooth
-     * per-sample envelope ducking (so BGM/SFX dips smoothly while the dubber speaks).
+     * Mixes time-aligned Filipino dubbed clips onto original background audio with optional
+     * real Mid/Side center-vocal stripping so original foreign speech does NOT talk over the dub.
      */
     fun mixDubClipsIntoStereoTimeline(
         originalStereoPcm: ShortArray?,
         totalDurationSamplesPerChannel: Int,
         sampleRate: Int,
         dubClips: List<TimedPcmClip>,
-        backgroundGainDuringSpeech: Float
+        backgroundGainDuringSpeech: Float,
+        stripCenterVocals: Boolean = false
     ): ShortArray {
-        val totalMonoSamples = totalDurationSamplesPerChannel.coerceAtLeast(1)
-        val duckEnvelope = FloatArray(totalMonoSamples) { 1.0f }
-
-        // Mark speech windows for smooth ducking
-        for (clip in dubClips) {
-            val s = clip.startSample.coerceIn(0, totalMonoSamples - 1)
-            val e = (clip.startSample + clip.monoSamples.size).coerceIn(s, totalMonoSamples)
-            for (i in s until e) {
-                duckEnvelope[i] = backgroundGainDuringSpeech
-            }
-        }
-
-        // Smooth ducking transitions (~80ms attack/release) to avoid abrupt volume pumping
-        val smoothWindow = (sampleRate * 0.08f).roundToInt().coerceAtLeast(1)
-        var currentGain = 1.0f
-        val alpha = 1.0f / smoothWindow.toFloat()
-        for (i in 0 until totalMonoSamples) {
-            val target = duckEnvelope[i]
-            currentGain += (target - currentGain) * alpha
-            duckEnvelope[i] = currentGain
-        }
-
-        val dubTrack = FloatArray(totalMonoSamples)
-        val fadeSamples = (sampleRate * 0.020f).roundToInt().coerceAtLeast(1)
-        for (clip in dubClips) {
-            val src = clip.monoSamples
-            val len = src.size
-            for (i in 0 until len) {
-                val destIdx = clip.startSample + i
-                if (destIdx !in 0 until totalMonoSamples) continue
-                val fadeIn = if (i < fadeSamples) i.toFloat() / fadeSamples else 1.0f
-                val fadeOut = if (len - 1 - i < fadeSamples) (len - 1 - i).toFloat() / fadeSamples else 1.0f
-                val env = min(fadeIn, fadeOut).coerceIn(0f, 1f)
-                dubTrack[destIdx] += (src[i].toFloat() / 32768f) * env * 1.15f
-            }
-        }
-
-        val stereoOut = ShortArray(totalMonoSamples * 2)
-        for (i in 0 until totalMonoSamples) {
-            val duck = duckEnvelope[i]
-            val origL = if (originalStereoPcm != null && (i * 2) < originalStereoPcm.size) {
-                (originalStereoPcm[i * 2].toFloat() / 32768f) * duck
-            } else 0f
-            val origR = if (originalStereoPcm != null && (i * 2 + 1) < originalStereoPcm.size) {
-                (originalStereoPcm[i * 2 + 1].toFloat() / 32768f) * duck
-            } else origL
-
-            val dub = dubTrack[i]
-            val mixedL = softClipSample(origL + dub)
-            val mixedR = softClipSample(origR + dub)
-            stereoOut[i * 2] = mixedL
-            stereoOut[i * 2 + 1] = mixedR
-        }
-        return stereoOut
+        return mixDubBlockIntoStereo(
+            originalStereoBlock = originalStereoPcm,
+            blockStartSample = 0,
+            blockLengthSamples = totalDurationSamplesPerChannel.coerceAtLeast(1),
+            sampleRate = sampleRate,
+            overlappingClips = dubClips,
+            backgroundGainDuringSpeech = backgroundGainDuringSpeech,
+            duckingState = DuckingFilterState(1.0f),
+            stripCenterVocals = stripCenterVocals,
+            vocalStripState = VocalStripFilterState()
+        )
     }
 
     /**
-     * Duration-preserving pitch shift using WSOLA + linear resampling so single-speaker
-     * open-source TTS models (like facebook/mms-tts-tgl) produce distinct voices per speaker.
+     * Duration-preserving pitch shift using WSOLA + cubic resampling.
      */
     fun pitchShiftMono(samples: ShortArray, sampleRate: Int, pitchFactor: Float): ShortArray {
-        val clampedPitch = pitchFactor.coerceIn(0.74f, 1.36f)
+        val clampedPitch = pitchFactor.coerceIn(0.82f, 1.24f)
         if (samples.size < 1024 || abs(clampedPitch - 1.0f) < 0.03f) return samples
-        // Compensate duration with WSOLA (1/pitchFactor), then resample to shift pitch cleanly
         val timeCompensated = wsolaTimeScale(samples, sampleRate, 1.0f / clampedPitch)
         val virtualSrcRate = (sampleRate * clampedPitch).roundToInt().coerceAtLeast(8000)
-        return resampleMonoLinear(timeCompensated, virtualSrcRate, sampleRate)
+        return resampleMonoCubic(timeCompensated, virtualSrcRate, sampleRate)
     }
 
     /**
      * Single-pass combined lip-sync tempo fitting + character pitch lock.
-     * Avoids double WSOLA windowing so character voice timbre stays crisp and consistent.
      */
     fun timeAndPitchScaleMono(
         samples: ShortArray,
@@ -353,30 +410,27 @@ object WavPcmTools {
         pitchFactor: Float
     ): ShortArray {
         if (samples.size < 1024) return samples
-        val clampedTempo = tempoSpeedFactor.coerceIn(0.78f, 1.50f)
-        val clampedPitch = pitchFactor.coerceIn(0.74f, 1.36f)
+        val clampedTempo = tempoSpeedFactor.coerceIn(0.84f, 1.32f)
+        val clampedPitch = pitchFactor.coerceIn(0.84f, 1.20f)
         val pitchActive = abs(clampedPitch - 1.0f) >= 0.03f
         val tempoActive = abs(clampedTempo - 1.0f) >= 0.04f
 
         if (!pitchActive && !tempoActive) return samples
         if (!pitchActive) return wsolaTimeScale(samples, sampleRate, clampedTempo)
 
-        // Combined WSOLA speed = tempo / pitch, then single resample by pitch
-        val wsolaSpeed = (clampedTempo / clampedPitch).coerceIn(0.65f, 1.75f)
+        val wsolaSpeed = (clampedTempo / clampedPitch).coerceIn(0.76f, 1.48f)
         val timeAdjusted = if (abs(wsolaSpeed - 1.0f) >= 0.03f) {
             wsolaTimeScale(samples, sampleRate, wsolaSpeed)
         } else {
             samples
         }
         val virtualSrcRate = (sampleRate * clampedPitch).roundToInt().coerceAtLeast(8000)
-        return resampleMonoLinear(timeAdjusted, virtualSrcRate, sampleRate)
+        return resampleMonoCubic(timeAdjusted, virtualSrcRate, sampleRate)
     }
 
-    data class DuckingFilterState(var currentGain: Float = 1.0f)
-
     /**
-     * Streaming block mixer for long-form videos (>8 minutes) so even 60-minute videos
-     * mix with <10 MB RAM while keeping smooth ducking envelope across block boundaries.
+     * Streaming block mixer with smooth speech-window ducking AND optional Mid/Side + 175Hz
+     * crossover center-vocal removal (preserves stereo BGM & sub-bass while silencing center dialogue).
      */
     fun mixDubBlockIntoStereo(
         originalStereoBlock: ShortArray?,
@@ -385,30 +439,36 @@ object WavPcmTools {
         sampleRate: Int,
         overlappingClips: List<TimedPcmClip>,
         backgroundGainDuringSpeech: Float,
-        duckingState: DuckingFilterState
+        duckingState: DuckingFilterState,
+        stripCenterVocals: Boolean = false,
+        vocalStripState: VocalStripFilterState = VocalStripFilterState()
     ): ShortArray {
         val blockLen = blockLengthSamples.coerceAtLeast(1)
-        val duckEnvelope = FloatArray(blockLen) { 1.0f }
+        val speechActiveMask = FloatArray(blockLen) { 0f }
 
+        // Pad vocal suppression slightly (+/- 120ms around dubbed line) so breaths/tails of original voice don't bleed
+        val padSamples = if (stripCenterVocals) (sampleRate * 0.12f).roundToInt() else 0
         for (clip in overlappingClips) {
-            val relStart = (clip.startSample - blockStartSample).coerceIn(0, blockLen - 1)
-            val relEnd = (clip.startSample + clip.monoSamples.size - blockStartSample).coerceIn(relStart, blockLen)
+            val relStart = (clip.startSample - padSamples - blockStartSample).coerceIn(0, blockLen - 1)
+            val relEnd = (clip.startSample + clip.monoSamples.size + padSamples - blockStartSample).coerceIn(relStart, blockLen)
             for (i in relStart until relEnd) {
-                duckEnvelope[i] = backgroundGainDuringSpeech
+                speechActiveMask[i] = 1f
             }
         }
 
         val smoothWindow = (sampleRate * 0.08f).roundToInt().coerceAtLeast(1)
-        val alpha = 1.0f / smoothWindow.toFloat()
+        val alphaEnv = 1.0f / smoothWindow.toFloat()
+        val envelope = FloatArray(blockLen)
         var currentGain = duckingState.currentGain
         for (i in 0 until blockLen) {
-            currentGain += (duckEnvelope[i] - currentGain) * alpha
-            duckEnvelope[i] = currentGain
+            val target = if (speechActiveMask[i] > 0.5f) backgroundGainDuringSpeech else 1.0f
+            currentGain += (target - currentGain) * alphaEnv
+            envelope[i] = currentGain
         }
         duckingState.currentGain = currentGain
 
         val dubTrack = FloatArray(blockLen)
-        val fadeSamples = (sampleRate * 0.020f).roundToInt().coerceAtLeast(1)
+        val fadeSamples = (sampleRate * 0.018f).roundToInt().coerceAtLeast(1)
         for (clip in overlappingClips) {
             val src = clip.monoSamples
             val len = src.size
@@ -418,29 +478,90 @@ object WavPcmTools {
                 val fadeIn = if (i < fadeSamples) i.toFloat() / fadeSamples else 1.0f
                 val fadeOut = if (len - 1 - i < fadeSamples) (len - 1 - i).toFloat() / fadeSamples else 1.0f
                 val env = min(fadeIn, fadeOut).coerceIn(0f, 1f)
-                dubTrack[destRel] += (src[i].toFloat() / 32768f) * env * 1.15f
+                dubTrack[destRel] += (src[i].toFloat() / 32768f) * env * 1.18f
             }
         }
 
+        // 175Hz crossover & energy tracker for stereo Mid/Side vocal cancellation
+        val dt = 1.0f / sampleRate.coerceAtLeast(8000).toFloat()
+        val rcBass = 1.0f / (2.0f * Math.PI.toFloat() * 175f)
+        val alphaBass = dt / (rcBass + dt)
+        val alphaEnergy = 1.0f / (sampleRate * 0.05f).coerceAtLeast(1f)
+
+        var midBassLp = vocalStripState.midBassLp
+        var sideEnergy = vocalStripState.sideEnergySmooth
+        var midHighEnergy = vocalStripState.midHighEnergySmooth
+
         val stereoOut = ShortArray(blockLen * 2)
         for (i in 0 until blockLen) {
-            val duck = duckEnvelope[i]
-            val origL = if (originalStereoBlock != null && (i * 2) < originalStereoBlock.size) {
-                (originalStereoBlock[i * 2].toFloat() / 32768f) * duck
+            val rawL = if (originalStereoBlock != null && (i * 2) < originalStereoBlock.size) {
+                originalStereoBlock[i * 2].toFloat() / 32768f
             } else 0f
-            val origR = if (originalStereoBlock != null && (i * 2 + 1) < originalStereoBlock.size) {
-                (originalStereoBlock[i * 2 + 1].toFloat() / 32768f) * duck
-            } else origL
+            val rawR = if (originalStereoBlock != null && (i * 2 + 1) < originalStereoBlock.size) {
+                originalStereoBlock[i * 2 + 1].toFloat() / 32768f
+            } else rawL
+
+            val envVal = envelope[i]
+            val speechBlend = ((1.0f - envVal) / (1.0f - backgroundGainDuringSpeech).coerceAtLeast(0.01f))
+                .coerceIn(0f, 1f)
+
+            val bgmL: Float
+            val bgmR: Float
+
+            if (!stripCenterVocals) {
+                bgmL = rawL * envVal
+                bgmR = rawR * envVal
+            } else {
+                val mid = 0.5f * (rawL + rawR)
+                val side = 0.5f * (rawL - rawR)
+                midBassLp += alphaBass * (mid - midBassLp)
+                val midHigh = mid - midBassLp
+
+                sideEnergy += alphaEnergy * ((side * side) - sideEnergy)
+                midHighEnergy += alphaEnergy * ((midHigh * midHigh) - midHighEnergy)
+
+                // If audio has genuine stereo content (music/SFX in side channel), keep stereo side
+                // while canceling dead-center vocals (midHigh). If audio is dual-mono (side ~ 0),
+                // silence center vocals cleanly during speech so original voice does not clash.
+                val stereoRatio = if (midHighEnergy > 1e-7f) {
+                    (sideEnergy / midHighEnergy).coerceIn(0f, 1f)
+                } else 0f
+                val hasStereoMusic = stereoRatio > 0.03f
+
+                // Keep subtle vocals when there's zero dubbed speech (intro/pauses),
+                // strip 97% of center dialogue during speech (and keep BGM stereo side alive).
+                val centerHighKeep = (1.0f - 0.97f * speechBlend).coerceIn(0.02f, 0.85f)
+                val bassKeep = (0.75f - 0.42f * speechBlend).coerceIn(0.28f, 0.75f)
+                val sideKeep = if (hasStereoMusic) {
+                    (0.95f - 0.25f * speechBlend).coerceIn(0.65f, 0.95f)
+                } else {
+                    0f
+                }
+
+                // Smooth mono fallback gain if L == R (so original mono dialogue doesn't leak)
+                val strippedMid = (midBassLp * bassKeep) + (midHigh * centerHighKeep)
+                val monoFallback = mid * envVal
+                val finalMid = if (hasStereoMusic) strippedMid else (strippedMid * 0.25f + monoFallback * 0.75f)
+                val finalSide = side * sideKeep
+
+                bgmL = finalMid + finalSide
+                bgmR = finalMid - finalSide
+            }
 
             val dub = dubTrack[i]
-            stereoOut[i * 2] = softClipSample(origL + dub)
-            stereoOut[i * 2 + 1] = softClipSample(origR + dub)
+            stereoOut[i * 2] = softClipSample(bgmL + dub)
+            stereoOut[i * 2 + 1] = softClipSample(bgmR + dub)
         }
+
+        vocalStripState.midBassLp = midBassLp
+        vocalStripState.sideEnergySmooth = sideEnergy
+        vocalStripState.midHighEnergySmooth = midHighEnergy
+
         return stereoOut
     }
 
     private fun softClipSample(normalized: Float): Short {
-        val shaped = if (abs(normalized) > 0.92f) {
+        val shaped = if (abs(normalized) > 0.90f) {
             tanh(normalized.toDouble()).toFloat()
         } else {
             normalized

@@ -74,6 +74,7 @@ import com.example.data.model.DubAudioDuckingMode
 import com.example.data.model.DubSourceLanguage
 import com.example.data.model.DubVoiceEngine
 import com.example.data.model.LocalVideoInspection
+import com.example.data.model.WhisperBrainTier
 import com.example.data.network.TranscriptSerializer
 import com.example.ui.DubRenderUiState
 import com.example.ui.DubScriptUiState
@@ -86,6 +87,7 @@ import com.example.ui.components.MmsOnnxModelCard
 import com.example.ui.components.MultiSpeakerToggleCard
 import com.example.ui.components.StudioTopHeader
 import com.example.ui.components.VideoPlayerDialog
+import com.example.ui.components.WhisperBrainModelCard
 import com.example.ui.components.formatDurationSeconds
 import com.example.ui.components.formatFileSize
 import com.example.ui.theme.StudioBorder
@@ -107,6 +109,7 @@ fun DubberScreen(
     downloadedClips: List<DownloadedClipEntity>,
     onVideoPicked: (android.net.Uri) -> Unit,
     onSelectDownloadedClip: (localPath: String, contentUri: String) -> Unit,
+    onAutoDubAndRender: () -> Unit,
     onSelectSourceLanguage: (DubSourceLanguage) -> Unit,
     onSelectVoiceEngine: (DubVoiceEngine) -> Unit,
     onSelectDuckingMode: (DubAudioDuckingMode) -> Unit,
@@ -117,6 +120,11 @@ fun DubberScreen(
     onCycleCharacterVoice: (String) -> Unit,
     onDownloadMmsModel: () -> Unit,
     onDeleteMmsModel: () -> Unit,
+    onDownloadWhisperModel: () -> Unit,
+    onDeleteWhisperModel: () -> Unit,
+    onSelectWhisperTier: (WhisperBrainTier) -> Unit,
+    onTogglePreferOfflineWhisper: (Boolean) -> Unit,
+    onToggleAutoStartOnDrop: (Boolean) -> Unit,
     onGenerateDubScript: () -> Unit,
     onImportOfflineScript: (String) -> Unit,
     onUpdateDubLineText: (Long, String) -> Unit,
@@ -152,12 +160,28 @@ fun DubberScreen(
 
     val videoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia(),
-        onResult = { uri -> if (uri != null) onVideoPicked(uri) }
+        onResult = { uri ->
+            if (uri != null) {
+                if (dubberState.autoStartOnVideoDrop) {
+                    runWithNotificationPermission { onVideoPicked(uri) }
+                } else {
+                    onVideoPicked(uri)
+                }
+            }
+        }
     )
 
     val documentVideoLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
-        onResult = { uri -> if (uri != null) onVideoPicked(uri) }
+        onResult = { uri ->
+            if (uri != null) {
+                if (dubberState.autoStartOnVideoDrop) {
+                    runWithNotificationPermission { onVideoPicked(uri) }
+                } else {
+                    onVideoPicked(uri)
+                }
+            }
+        }
     )
 
     Box(
@@ -177,6 +201,7 @@ fun DubberScreen(
                     subtitle = stringResource(R.string.dubber_subtitle),
                     hasApiKey = settings.hasApiKey,
                     providerLabel = settings.activeProvider.shortBadge,
+                    offlineOpenSourceLabel = "Open-Source · Zero Key",
                     onOpenKeySheet = onOpenKeySheet
                 )
             }
@@ -248,7 +273,13 @@ fun DubberScreen(
                                         modifier = Modifier
                                             .clip(RoundedCornerShape(12.dp))
                                             .clickable {
-                                                onSelectDownloadedClip(clip.localFilePath, clip.contentUriString)
+                                                if (dubberState.autoStartOnVideoDrop) {
+                                                    runWithNotificationPermission {
+                                                        onSelectDownloadedClip(clip.localFilePath, clip.contentUriString)
+                                                    }
+                                                } else {
+                                                    onSelectDownloadedClip(clip.localFilePath, clip.contentUriString)
+                                                }
                                             }
                                             .testTag("dubber_quick_clip_${clip.id}")
                                     ) {
@@ -331,7 +362,168 @@ fun DubberScreen(
                 }
             }
 
-            // 2. Source Language & Lip-Timed Translation Card
+            // 1-Tap Automatic Translate + Speaker Detection + Vocal Strip + Render Card
+            item {
+                val isBusy = dubberState.isAutoPipelineRunning ||
+                    dubberState.renderState is DubRenderUiState.Rendering ||
+                    dubberState.scriptState is DubScriptUiState.Generating
+                Surface(
+                    shape = RoundedCornerShape(22.dp),
+                    color = StudioSurface,
+                    border = BorderStroke(
+                        1.5.dp,
+                        if (isBusy) StudioEmerald else StudioCyan.copy(alpha = 0.65f)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(18.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text(
+                            text = "2. Automatic Filipino Dubbing (1-Tap)",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = StudioTextPrimary
+                        )
+                        Text(
+                            text = if (dubberState.autoStartOnVideoDrop) {
+                                "Drop/piliin lang ang MP4 — kusa nang makikinig gamit ang OpenAI ${dubberState.whisperBrainTier.label} + ML Kit, magde-detect ng speakers, magta-tanggal ng original voice (BGM kept), at magre-render sa Gallery!"
+                            } else {
+                                "Awtomatikong nakikinig sa MP4 gamit ang OpenAI ${dubberState.whisperBrainTier.label} + ML Kit (kahit walang API key), dine-detect ang boses ng mga characters, tinatanggal ang original dialogue (BGM kept), at nirerender sa Gallery."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = StudioTextSecondary
+                        )
+
+                        WhisperBrainModelCard(
+                            state = dubberState,
+                            onSelectTier = onSelectWhisperTier,
+                            onDownloadWhisper = { runWithNotificationPermission(onDownloadWhisperModel) },
+                            onDeleteWhisper = onDeleteWhisperModel,
+                            onTogglePreferOffline = onTogglePreferOfflineWhisper,
+                            onToggleAutoStartOnDrop = onToggleAutoStartOnDrop
+                        )
+
+                        if (dubberState.detectedCastSummary.isNotBlank()) {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = StudioCyan.copy(alpha = 0.12f),
+                                border = BorderStroke(1.dp, StudioCyan.copy(alpha = 0.45f)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = dubberState.detectedCastSummary,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = StudioCyan,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                                )
+                            }
+                        }
+
+                        if (isBusy) {
+                            val renderInfo = dubberState.renderState as? DubRenderUiState.Rendering
+                            val frac = renderInfo?.progress
+                            val pct = frac?.let { (it * 100f).toInt().coerceIn(0, 100) }
+                            val stageText = renderInfo?.stage
+                                ?: (dubberState.scriptState as? DubScriptUiState.Generating)?.stage
+                                ?: "Auto-dubbing MP4..."
+                            val headerText = when {
+                                pct != null && pct >= 80 -> "Patapos na! ($pct%) — Malapit nang mabuo ang dubbed MP4"
+                                pct != null -> "Auto-Dubbing Progress: $pct%"
+                                else -> "Auto-Dubbing in progress..."
+                            }
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(
+                                    text = headerText,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = if (pct != null && pct >= 80) StudioCyan else StudioEmerald
+                                )
+                                if (frac != null) {
+                                    LinearProgressIndicator(
+                                        progress = { frac },
+                                        color = StudioEmerald,
+                                        trackColor = StudioElevated,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(9.dp)
+                                            .clip(RoundedCornerShape(50))
+                                    )
+                                } else {
+                                    LinearProgressIndicator(
+                                        color = StudioEmerald,
+                                        trackColor = StudioElevated,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(9.dp)
+                                            .clip(RoundedCornerShape(50))
+                                    )
+                                }
+                                Text(
+                                    text = stageText,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = StudioEmerald
+                                )
+                                Text(
+                                    text = stringResource(R.string.dub_background_safe_note),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = StudioTextSecondary
+                                )
+                            }
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(Brush.horizontalGradient(listOf(StudioCyan, StudioEmerald)))
+                                    .clickable {
+                                        runWithNotificationPermission(onAutoDubAndRender)
+                                    }
+                                    .testTag("auto_dub_and_render_button")
+                                    .padding(vertical = 16.dp, horizontal = 14.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.AutoAwesome,
+                                        contentDescription = null,
+                                        tint = StudioObsidian,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                    Text(
+                                        text = stringResource(R.string.btn_auto_dub_now),
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = StudioObsidian
+                                    )
+                                }
+                            }
+                        }
+
+                        if (dubberState.renderState is DubRenderUiState.Error) {
+                            Text(
+                                text = (dubberState.renderState as DubRenderUiState.Error).message,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = StudioError
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (dubberState.renderState is DubRenderUiState.Success) {
+                val res = (dubberState.renderState as DubRenderUiState.Success).result
+                item {
+                    DubbedResultCard(
+                        result = res,
+                        onPreview = { previewVideoData = res.localFilePath to res.fileName },
+                        onShare = { shareLocalVideo(context, res.localFilePath) }
+                    )
+                }
+            }
+
+            // Optional Source Language & Manual/Offline .SRT Script Card
             item {
                 Surface(
                     shape = RoundedCornerShape(22.dp),
@@ -344,8 +536,8 @@ fun DubberScreen(
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Text(
-                            text = "2. Lip-Timed Filipino Script",
-                            style = MaterialTheme.typography.titleLarge,
+                            text = "Optional: Script & Offline .SRT (₱0)",
+                            style = MaterialTheme.typography.titleMedium,
                             color = StudioTextPrimary
                         )
 
@@ -381,11 +573,7 @@ fun DubberScreen(
                                     }
                                 )
                                 .clickable(enabled = !isGeneratingScript) {
-                                    if (!settings.hasApiKey) {
-                                        onOpenKeySheet()
-                                    } else {
-                                        runWithNotificationPermission(onGenerateDubScript)
-                                    }
+                                    runWithNotificationPermission(onGenerateDubScript)
                                 }
                                 .testTag("generate_dub_script_button")
                                 .padding(vertical = 15.dp),
@@ -582,12 +770,13 @@ fun DubberScreen(
                         if (dubberState.multiSpeakerEnabled && dubberState.speakerProfiles.isNotEmpty()) {
                             CharacterVoiceCastCard(
                                 speakerProfiles = dubberState.speakerProfiles,
+                                detectedCastSummary = dubberState.detectedCastSummary,
                                 onCycleCharacterVoice = onCycleCharacterVoice
                             )
                         }
 
                         Text(
-                            text = "Background Audio Ducking",
+                            text = "Original Voice Removal & BGM Mix",
                             style = MaterialTheme.typography.labelLarge,
                             color = StudioTextPrimary
                         )
@@ -689,17 +878,6 @@ fun DubberScreen(
                             )
                         }
                     }
-                }
-            }
-
-            if (dubberState.renderState is DubRenderUiState.Success) {
-                val res = (dubberState.renderState as DubRenderUiState.Success).result
-                item {
-                    DubbedResultCard(
-                        result = res,
-                        onPreview = { previewVideoData = res.localFilePath to res.fileName },
-                        onShare = { shareLocalVideo(context, res.localFilePath) }
-                    )
                 }
             }
 

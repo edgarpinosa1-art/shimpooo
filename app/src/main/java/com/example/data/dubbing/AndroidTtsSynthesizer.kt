@@ -52,14 +52,38 @@ class AndroidTtsSynthesizer(private val context: Context) {
             val lang = voice.locale.language.lowercase(Locale.US)
             val tag = voice.locale.toLanguageTag().lowercase(Locale.US)
             lang == "fil" || lang == "tl" || tag.contains("fil-ph") || tag.contains("tl-ph")
-        }.sortedBy { it.name }
+        }.sortedWith(
+            compareBy<android.speech.tts.Voice>(
+                { it.isNetworkConnectionRequired }, // Offline first (zero latency/fail)
+                { -it.quality },
+                { it.name }
+            )
+        )
 
         val mapped = filVoices.mapIndexed { idx, voice ->
-            val networkTag = if (voice.isNetworkConnectionRequired) "Online" else "Offline"
+            val offline = !voice.isNetworkConnectionRequired
+            val hdTag = if (voice.quality >= android.speech.tts.Voice.QUALITY_HIGH) "HD" else "Std"
+            val qualityBadge = if (offline) "Offline $hdTag" else "Online Neural"
+            val lowerName = voice.name.lowercase(Locale.US)
+            val features = runCatching { voice.features }.getOrNull().orEmpty().joinToString(",").lowercase(Locale.US)
+            val femaleHint: Boolean? = when {
+                lowerName.contains("female") || features.contains("female") -> true
+                lowerName.contains("male") || features.contains("male") -> false
+                lowerName.contains("-cfc") || lowerName.contains("-fid") -> true
+                lowerName.contains("-fie") || lowerName.contains("-ism") -> false
+                else -> null
+            }
+            val genderLabel = when (femaleHint) {
+                true -> " · Female"
+                false -> " · Male"
+                null -> ""
+            }
             DubVoiceOption(
                 id = voice.name,
-                label = "Filipino Voice ${idx + 1} ($networkTag)",
-                localeTag = voice.locale.toLanguageTag()
+                label = "Filipino Voice ${idx + 1} ($qualityBadge$genderLabel)",
+                localeTag = voice.locale.toLanguageTag(),
+                isFemaleHint = femaleHint,
+                isOfflineHd = offline
             )
         }
         return if (mapped.isNotEmpty()) {
@@ -76,12 +100,27 @@ class AndroidTtsSynthesizer(private val context: Context) {
         speechRate: Float,
         destWavFile: File
     ): Result<File> = withContext(Dispatchers.IO) {
+        val primary = synthesizeSinglePass(text, voiceId, pitch, speechRate, destWavFile)
+        if (primary.isSuccess || voiceId.isBlank()) {
+            return@withContext primary
+        }
+        // Fallback once with system default fil-PH voice so synthesis never breaks mid-video
+        synthesizeSinglePass(text, "", pitch, speechRate, destWavFile)
+    }
+
+    private suspend fun synthesizeSinglePass(
+        text: String,
+        voiceId: String,
+        pitch: Float,
+        speechRate: Float,
+        destWavFile: File
+    ): Result<File> {
         if (!ensureInitialized()) {
-            return@withContext Result.failure(
+            return Result.failure(
                 IllegalStateException("Hindi ma-initialize ang Android Speech Services sa device na ito.")
             )
         }
-        val engine = tts ?: return@withContext Result.failure(
+        val engine = tts ?: return Result.failure(
             IllegalStateException("TextToSpeech engine unavailable.")
         )
 
@@ -98,13 +137,21 @@ class AndroidTtsSynthesizer(private val context: Context) {
             }
         }
 
-        engine.setPitch(pitch.coerceIn(0.70f, 1.40f))
-        engine.setSpeechRate(speechRate.coerceIn(0.75f, 1.45f))
+        engine.setPitch(pitch.coerceIn(0.80f, 1.25f))
+        engine.setSpeechRate(speechRate.coerceIn(0.82f, 1.32f))
 
         val utteranceId = "dub_${UUID.randomUUID()}"
-        val cleanText = MmsTagalogOnnxEngine.normalizeTagalogForTts(text).ifBlank { text }
+        val cleanText = text
+            .replace(Regex("""\[[^\]]+]"""), " ")
+            .replace("&", " at ")
+            .replace("%", " porsyento ")
+            .replace("₱", " piso ")
+            .replace("$", " dolyar ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+            .ifBlank { text }
 
-        suspendCancellableCoroutine { cont ->
+        return suspendCancellableCoroutine { cont ->
             engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(uid: String?) = Unit
 

@@ -29,6 +29,7 @@ import com.example.data.model.TargetVideoGenerator
 import com.example.data.model.TranscriptLanguageMode
 import com.example.data.model.VideoAspectRatio
 import com.example.data.model.VideoTranscript
+import com.example.data.model.WhisperBrainTier
 import com.example.data.network.GeminiVideoAnalyzerRepository
 import com.example.data.network.PromptBlueprintSerializer
 import com.example.data.network.ThirdPartyAiRepository
@@ -294,15 +295,22 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
     // =========================================================================
     // PROMPT STUDIO ACTIONS
     // =========================================================================
-    fun onLocalVideoSelected(uri: Uri) {
+    fun onLocalVideoSelected(uri: Uri, autoStartDubIfEnabled: Boolean = false) {
         viewModelScope.launch {
             _studioState.value = StudioAnalysisUiState.InspectingVideo
             _transcriptState.value = TranscriptUiState.InspectingVideo
             try {
                 val inspection = frameExtractor.inspectVideo(uri)
                 _selectedVideo.value = inspection
+                dubbingCoordinator.onSelectedVideoChanged(inspection.uriString)
                 _studioState.value = StudioAnalysisUiState.Idle
                 _transcriptState.value = TranscriptUiState.Idle
+                if (autoStartDubIfEnabled &&
+                    dubbingCoordinator.state.value.autoStartOnVideoDrop &&
+                    !dubbingCoordinator.isBackgroundWorkActive()
+                ) {
+                    autoDubAndRenderFilipinoVideo()
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -313,14 +321,18 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun loadDownloadedClipIntoStudio(localFilePath: String, contentUriString: String) {
+    fun loadDownloadedClipIntoStudio(
+        localFilePath: String,
+        contentUriString: String,
+        autoStartDubIfEnabled: Boolean = false
+    ) {
         val localFile = File(localFilePath)
         val uri = if (localFile.exists()) {
             Uri.fromFile(localFile)
         } else {
             Uri.parse(contentUriString)
         }
-        onLocalVideoSelected(uri)
+        onLocalVideoSelected(uri, autoStartDubIfEnabled = autoStartDubIfEnabled)
     }
 
     fun updateExtraCreatorNotes(notes: String) {
@@ -712,6 +724,19 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun deleteMmsTagalogModel() = dubbingCoordinator.deleteMmsTagalogModel()
 
+    fun downloadWhisperBaseModel() = dubbingCoordinator.downloadWhisperBaseModel()
+
+    fun deleteWhisperBaseModel() = dubbingCoordinator.deleteWhisperBaseModel()
+
+    fun selectWhisperBrainTier(tier: WhisperBrainTier) =
+        dubbingCoordinator.selectWhisperBrainTier(tier)
+
+    fun toggleAutoStartOnVideoDrop(enabled: Boolean) =
+        dubbingCoordinator.toggleAutoStartOnVideoDrop(enabled)
+
+    fun togglePreferOfflineWhisperBrain(prefer: Boolean) =
+        dubbingCoordinator.togglePreferOfflineWhisperBrain(prefer)
+
     fun generateFilipinoDubScript() {
         dubbingCoordinator.generateFilipinoDubScript(
             inspection = _selectedVideo.value,
@@ -719,12 +744,40 @@ class ReelForgeViewModel(application: Application) : AndroidViewModel(applicatio
         )
     }
 
+    fun autoDubAndRenderFilipinoVideo(onNeedApiKey: () -> Unit = {}) {
+        val inspection = _selectedVideo.value
+        val cachedTranscript = if (inspection != null) {
+            videoTranscripts.value.firstOrNull { it.sourceUriString == inspection.uriString }?.let { entity ->
+                runCatching {
+                    val mode = TranscriptLanguageMode.entries.firstOrNull { it.name == entity.languageModeName }
+                        ?: TranscriptLanguageMode.ORIGINAL_VERBATIM
+                    TranscriptSerializer.fromGeminiOrStoredJson(
+                        jsonString = entity.payloadJson,
+                        id = entity.id,
+                        videoTitle = entity.videoTitle,
+                        sourceUriString = entity.sourceUriString,
+                        geminiModelUsed = entity.geminiModelUsed,
+                        languageMode = mode,
+                        createdAt = entity.createdAt
+                    )
+                }.getOrNull()
+            }
+        } else null
+
+        dubbingCoordinator.autoDubAndRenderVideo(
+            inspection = inspection,
+            settings = userSettings.value,
+            cachedTranscriptForVideo = cachedTranscript,
+            onNeedApiKey = onNeedApiKey
+        )
+    }
+
     fun importOfflineDubScript(rawScript: String, onFeedback: (String) -> Unit) {
-        val count = dubbingCoordinator.importOfflineScript(rawScript)
+        val count = dubbingCoordinator.importOfflineScript(rawScript, _selectedVideo.value, translateToTagalog = true)
         if (count <= 0) {
             onFeedback("Walang valid timestamp format. Gumamit ng SRT o [00:01 - 00:04] Teksto.")
         } else {
-            onFeedback("Na-import ang $count timed Filipino dub lines!")
+            onFeedback("Na-import ang $count lines (auto-translated & speaker-analyzed)!")
         }
     }
 

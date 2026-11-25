@@ -3,6 +3,7 @@ package com.example.ui.components
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
@@ -23,6 +25,8 @@ import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -49,6 +53,7 @@ import com.example.data.model.DubVoiceOption
 import com.example.data.model.DubbedVideoResult
 import com.example.data.model.MmsModelStatus
 import com.example.data.model.SpeakerVoiceProfile
+import com.example.data.model.WhisperBrainTier
 import com.example.ui.DubberPanelState
 import com.example.ui.theme.StudioBorder
 import com.example.ui.theme.StudioCoral
@@ -242,9 +247,9 @@ fun AndroidVoiceTuningCard(
                     color = StudioTextSecondary
                 )
                 Slider(
-                    value = pitch,
+                    value = pitch.coerceIn(0.84f, 1.22f),
                     onValueChange = onPitchChanged,
-                    valueRange = 0.75f..1.35f,
+                    valueRange = 0.84f..1.22f,
                     colors = SliderDefaults.colors(
                         thumbColor = StudioCyan,
                         activeTrackColor = StudioCyan
@@ -260,9 +265,9 @@ fun AndroidVoiceTuningCard(
                 color = StudioTextSecondary
             )
             Slider(
-                value = baseSpeed,
+                value = baseSpeed.coerceIn(0.84f, 1.30f),
                 onValueChange = onSpeedChanged,
-                valueRange = 0.80f..1.35f,
+                valueRange = 0.84f..1.30f,
                 colors = SliderDefaults.colors(
                     thumbColor = StudioCoral,
                     activeTrackColor = StudioCoral
@@ -498,6 +503,7 @@ fun MultiSpeakerToggleCard(
 @Composable
 fun CharacterVoiceCastCard(
     speakerProfiles: Map<String, SpeakerVoiceProfile>,
+    detectedCastSummary: String = "",
     onCycleCharacterVoice: (String) -> Unit
 ) {
     if (speakerProfiles.isEmpty()) return
@@ -512,10 +518,17 @@ fun CharacterVoiceCastCard(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
-                text = "Locked Character Voices (Consistent Start → End)",
+                text = "Locked Character Voices (Auto-Detected from MP4)",
                 style = MaterialTheme.typography.labelLarge,
                 color = StudioTextPrimary
             )
+            if (detectedCastSummary.isNotBlank()) {
+                Text(
+                    text = detectedCastSummary,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = StudioEmerald
+                )
+            }
             Text(
                 text = "Tap any character to change their locked pitch/voice before rendering.",
                 style = MaterialTheme.typography.bodySmall,
@@ -553,3 +566,185 @@ fun CharacterVoiceCastCard(
         }
     }
 }
+
+@Composable
+fun WhisperBrainModelCard(
+    state: DubberPanelState,
+    onSelectTier: (WhisperBrainTier) -> Unit,
+    onDownloadWhisper: () -> Unit,
+    onDeleteWhisper: () -> Unit,
+    onTogglePreferOffline: (Boolean) -> Unit,
+    onToggleAutoStartOnDrop: (Boolean) -> Unit
+) {
+    val activeTier = state.whisperBrainTier
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = StudioObsidian,
+        border = BorderStroke(
+            1.dp,
+            when (state.whisperModelStatus) {
+                MmsModelStatus.READY -> StudioEmerald.copy(alpha = 0.6f)
+                MmsModelStatus.ERROR -> StudioError.copy(alpha = 0.6f)
+                else -> StudioBorder
+            }
+        ),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "OpenAI ${activeTier.label} (ONNX · ₱0)",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = StudioTextPrimary
+                    )
+                    Text(
+                        text = when (state.whisperModelStatus) {
+                            MmsModelStatus.READY -> String.format(
+                                Locale.US,
+                                "Offline AI Brain Ready · %.1f MB",
+                                state.whisperModelSizeMb
+                            )
+                            MmsModelStatus.DOWNLOADING -> state.whisperDownloadStage
+                            MmsModelStatus.ERROR -> state.whisperDownloadStage.ifBlank { "Whisper download error" }
+                            MmsModelStatus.NOT_INSTALLED -> "1-time (${activeTier.approxSizeLabel}) strongest open-source speech AI. Listens & translates any MP4 offline (auto-falls back if RAM is tight)."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = when (state.whisperModelStatus) {
+                            MmsModelStatus.READY -> StudioEmerald
+                            MmsModelStatus.ERROR -> StudioError
+                            MmsModelStatus.DOWNLOADING -> StudioCyan
+                            MmsModelStatus.NOT_INSTALLED -> StudioTextSecondary
+                        }
+                    )
+                }
+
+                if (state.whisperModelStatus == MmsModelStatus.READY) {
+                    IconButton(
+                        onClick = onDeleteWhisper,
+                        modifier = Modifier.testTag("delete_whisper_model_button")
+                    ) {
+                        Icon(
+                            Icons.Filled.DeleteOutline,
+                            contentDescription = "Delete downloaded Whisper model",
+                            tint = StudioTextSecondary
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                WhisperBrainTier.entries.forEach { tierOption ->
+                    val selected = activeTier == tierOption
+                    FilterChip(
+                        selected = selected,
+                        enabled = state.whisperModelStatus != MmsModelStatus.DOWNLOADING && !state.isAutoPipelineRunning,
+                        onClick = { onSelectTier(tierOption) },
+                        label = { Text("${tierOption.name.replace("_", "-")} (${tierOption.shortBadge})") },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = StudioCyan.copy(alpha = 0.2f),
+                            selectedLabelColor = StudioCyan
+                        ),
+                        modifier = Modifier.testTag("whisper_tier_${tierOption.name}")
+                    )
+                }
+            }
+
+            if (state.whisperModelStatus == MmsModelStatus.DOWNLOADING) {
+                if (state.whisperDownloadProgress != null) {
+                    LinearProgressIndicator(
+                        progress = { state.whisperDownloadProgress },
+                        color = StudioCyan,
+                        trackColor = StudioElevated,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(7.dp)
+                            .clip(RoundedCornerShape(50))
+                    )
+                } else {
+                    LinearProgressIndicator(
+                        color = StudioCyan,
+                        trackColor = StudioElevated,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(7.dp)
+                            .clip(RoundedCornerShape(50))
+                    )
+                }
+            } else if (state.whisperModelStatus != MmsModelStatus.READY) {
+                OutlinedButton(
+                    onClick = onDownloadWhisper,
+                    border = BorderStroke(1.dp, StudioCyan.copy(alpha = 0.7f)),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("download_whisper_model_button")
+                ) {
+                    Icon(Icons.Filled.CloudDownload, contentDescription = null, tint = StudioCyan, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Pre-Download ${activeTier.label} (${activeTier.approxSizeLabel})", style = MaterialTheme.typography.labelLarge, color = StudioCyan)
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Auto-Dub Agad Pagpili ng MP4",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = StudioTextPrimary
+                    )
+                    Text(
+                        text = "Ilagay lang ang MP4 at kusa nang magda-dub hanggang Gallery.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = StudioTextSecondary
+                    )
+                }
+                Switch(
+                    checked = state.autoStartOnVideoDrop,
+                    onCheckedChange = onToggleAutoStartOnDrop,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = StudioObsidian,
+                        checkedTrackColor = StudioCyan
+                    ),
+                    modifier = Modifier.testTag("auto_start_on_drop_switch")
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.CheckCircle,
+                    contentDescription = null,
+                    tint = StudioEmerald,
+                    modifier = Modifier.size(16.dp)
+                )
+                Text(
+                    text = "100% Open-Source Only · Zero API Keys (${activeTier.label} + ML Kit)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = StudioEmerald
+                )
+            }
+        }
+    }
+}
+

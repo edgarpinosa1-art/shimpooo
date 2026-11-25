@@ -398,27 +398,55 @@ class ThirdPartyAiRepository(private val context: Context) {
             val batches = rawSegments.chunked(28)
             val discoveredRoster = linkedSetOf<String>()
             val allDubLines = mutableListOf<DubLineItem>()
+            var useOfflineFallback = false
 
             for ((bIdx, batch) in batches.withIndex()) {
-                onStageUpdate("Adapting Filipino lip-sync lines (${bIdx + 1}/${batches.size}) via $activeChat...")
-                val (dubBatch, usedChat) = translateDubBatchWithChatModel(
-                    provider = provider,
-                    apiKey = cleanKey,
-                    baseUrl = resolvedBase,
-                    initialModelId = activeChat,
-                    batch = batch,
-                    sourceLanguage = sourceLanguage,
-                    discoveredRoster = discoveredRoster,
-                    onModelFallback = { fallback ->
-                        activeChat = fallback
-                        onModelsAutoUpdated(null, fallback)
+                if (!useOfflineFallback) {
+                    onStageUpdate("Adapting Filipino lip-sync lines (${bIdx + 1}/${batches.size}) via $activeChat...")
+                    val chatAttempt = runCatching {
+                        translateDubBatchWithChatModel(
+                            provider = provider,
+                            apiKey = cleanKey,
+                            baseUrl = resolvedBase,
+                            initialModelId = activeChat,
+                            batch = batch,
+                            sourceLanguage = sourceLanguage,
+                            discoveredRoster = discoveredRoster,
+                            onModelFallback = { fallback ->
+                                activeChat = fallback
+                                onModelsAutoUpdated(null, fallback)
+                            }
+                        )
                     }
-                )
-                activeChat = usedChat
-                dubBatch.forEach { item ->
-                    discoveredRoster.add(item.speaker)
-                    allDubLines.add(item)
+                    if (chatAttempt.isSuccess) {
+                        val (dubBatch, usedChat) = chatAttempt.getOrThrow()
+                        activeChat = usedChat
+                        dubBatch.forEach { item ->
+                            discoveredRoster.add(item.speaker)
+                            allDubLines.add(item)
+                        }
+                        continue
+                    } else {
+                        Log.w(TAG, "Chat LLM translation fallback triggered, using Free ML Kit Tagalog", chatAttempt.exceptionOrNull())
+                        useOfflineFallback = true
+                    }
                 }
+
+                // Fallback: Free On-Device ML Kit Tagalog Translation
+                val rawDubItems = batch.map { seg ->
+                    DubLineItem(
+                        id = seg.index.toLong(),
+                        startMs = seg.startMs,
+                        endMs = seg.endMs,
+                        speaker = seg.speaker,
+                        originalText = seg.text,
+                        filipinoText = seg.text
+                    )
+                }
+                val offlineResult = com.example.data.dubbing.OfflineTagalogTranslator()
+                    .translateLinesToTagalog(rawDubItems, sourceLanguage, onStageUpdate)
+                val translatedBatch = offlineResult.getOrDefault(rawDubItems)
+                allDubLines.addAll(translatedBatch)
             }
 
             val normalized = allDubLines.mapIndexed { idx, line ->

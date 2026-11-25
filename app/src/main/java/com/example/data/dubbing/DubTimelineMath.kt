@@ -144,16 +144,15 @@ object DubTimelineMath {
     }
 
     /**
-     * Computes pitch-preserving speed factor so synthesized speech fits its lip-sync window cleanly.
-     * Returns values clamped in [0.85f, 1.45f] to preserve intelligibility.
+     * Natural speech pacing: never slows down short clips (leaves natural breathing pauses),
+     * absorbs <=12% minor overflow cleanly, and gently compresses long lines up to 1.28x.
      */
     fun computeTempoRatioForWindow(ttsDurationMs: Long, targetWindowMs: Long): Float {
         if (ttsDurationMs <= 0L || targetWindowMs <= 0L) return 1.0f
         val rawRatio = ttsDurationMs.toFloat() / targetWindowMs.toFloat()
         return when {
-            rawRatio in 0.94f..1.05f -> 1.0f // Already tight match
-            rawRatio > 1.05f -> rawRatio.coerceAtMost(1.45f)
-            else -> rawRatio.coerceAtLeast(0.85f)
+            rawRatio <= 1.12f -> 1.0f
+            else -> rawRatio.coerceAtMost(1.28f)
         }
     }
 
@@ -184,24 +183,24 @@ object DubTimelineMath {
 
     fun describePitchPreset(relativePitch: Float): String {
         return when {
-            relativePitch <= 0.87f -> "Deep"
-            relativePitch <= 0.94f -> "Warm"
-            relativePitch <= 1.05f -> "Natural"
-            relativePitch <= 1.13f -> "Light"
+            relativePitch <= 0.92f -> "Deep"
+            relativePitch <= 0.97f -> "Warm"
+            relativePitch <= 1.03f -> "Natural"
+            relativePitch <= 1.09f -> "Light"
             else -> "Bright"
         }
     }
 
     /**
-     * Assigns distinct pitch and Android voice ID per detected speaker so dialogues
-     * sound clearly differentiated even when using single-speaker MMS ONNX.
+     * Assigns natural gender-matched voice ID + subtle realistic pitch per detected character.
      */
     fun resolveSpeakerVoiceAssignment(
         speaker: String,
         distinctSpeakers: List<String>,
         basePitch: Float,
         availableVoices: List<com.example.data.model.DubVoiceOption>,
-        selectedVoiceId: String
+        selectedVoiceId: String,
+        detectedPitchHz: Float = 0f
     ): com.example.data.model.SpeakerVoiceProfile {
         val canonical = canonicalizeSpeakerName(speaker)
         val normalizedKey = canonical.lowercase(Locale.US)
@@ -212,42 +211,58 @@ object DubTimelineMath {
 
         val maleHints = listOf("male", "man", "boy", "father", "dad", "kuya", "lalaki", "guy", "king")
         val femaleHints = listOf("female", "woman", "girl", "mother", "mom", "ate", "babae", "lady", "queen")
-
-        val pitchPalette = floatArrayOf(1.00f, 1.15f, 0.86f, 1.21f, 0.92f)
-        val relativePitch = when {
-            femaleHints.any { normalizedKey.contains(it) } -> when (speakerIdx) {
-                0 -> 1.10f
-                else -> 1.16f
-            }
-            maleHints.any { normalizedKey.contains(it) } -> when (speakerIdx) {
-                0 -> 0.90f
-                else -> 0.85f
-            }
-            else -> pitchPalette[speakerIdx % pitchPalette.size]
+        val isFemale = femaleHints.any { normalizedKey.contains(it) } || (!maleHints.any { normalizedKey.contains(it) } && detectedPitchHz >= 182f)
+        val isMale = maleHints.any { normalizedKey.contains(it) } || (!isFemale && detectedPitchHz in 65f..162f)
+        val genderTag = when {
+            isFemale -> "Female"
+            isMale -> "Male"
+            else -> ""
         }
 
         val orderedVoices = buildList {
             if (selectedVoiceId.isNotBlank()) {
-                val primary = availableVoices.firstOrNull { it.id == selectedVoiceId }
-                if (primary != null) add(primary.id)
+                availableVoices.firstOrNull { it.id == selectedVoiceId }?.let { add(it) }
             }
             availableVoices.forEach { v ->
-                if (v.id.isNotBlank() && v.id !in this) add(v.id)
+                if (v.id.isNotBlank() && none { it.id == v.id }) add(v)
             }
         }
-        val assignedVoiceId = if (orderedVoices.isNotEmpty()) {
-            orderedVoices[speakerIdx % orderedVoices.size]
-        } else {
-            selectedVoiceId
+
+        // Prefer matching gender voice option if device provides multiple distinct voices
+        val assignedVoice = when {
+            isFemale && orderedVoices.any { it.isFemaleHint == true } -> {
+                val females = orderedVoices.filter { it.isFemaleHint == true }
+                females[speakerIdx % females.size]
+            }
+            isMale && orderedVoices.any { it.isFemaleHint == false } -> {
+                val males = orderedVoices.filter { it.isFemaleHint == false }
+                males[speakerIdx % males.size]
+            }
+            orderedVoices.isNotEmpty() -> orderedVoices[speakerIdx % orderedVoices.size]
+            else -> null
         }
 
-        val finalPitch = (basePitch * relativePitch).coerceIn(0.74f, 1.35f)
+        // Keep pitch shifts natural & realistic (smaller shift when native distinct voices already differ!)
+        val hasSeparateVoiceGender = assignedVoice?.isFemaleHint != null
+        val relativePitch = when {
+            isFemale && hasSeparateVoiceGender -> if (speakerIdx % 2 == 0) 1.00f else 1.04f
+            isMale && hasSeparateVoiceGender -> if (speakerIdx % 2 == 0) 0.98f else 0.94f
+            isFemale -> if (speakerIdx % 2 == 0) 1.07f else 1.12f
+            isMale -> if (speakerIdx % 2 == 0) 0.94f else 0.90f
+            else -> floatArrayOf(1.00f, 1.07f, 0.93f, 1.12f, 0.97f)[speakerIdx % 5]
+        }
+
+        val finalPitch = (basePitch * relativePitch).coerceIn(0.86f, 1.18f)
+        val assignedId = assignedVoice?.id ?: selectedVoiceId
+        val hzNote = if (detectedPitchHz > 0f) " · ~${detectedPitchHz.toInt()}Hz" else ""
         return com.example.data.model.SpeakerVoiceProfile(
             speakerKey = canonical,
             pitchMultiplier = finalPitch,
-            androidVoiceId = assignedVoiceId,
+            androidVoiceId = assignedId,
             lockedIndex = speakerIdx,
-            presetLabel = "${describePitchPreset(relativePitch)} (${String.format(Locale.US, "%.2fx", finalPitch)})"
+            presetLabel = "${describePitchPreset(relativePitch)} (${String.format(Locale.US, "%.2fx", finalPitch)}$hzNote)",
+            detectedPitchHz = detectedPitchHz,
+            genderTag = genderTag
         )
     }
 
@@ -260,7 +275,8 @@ object DubTimelineMath {
         existingCast: Map<String, com.example.data.model.SpeakerVoiceProfile>,
         basePitch: Float,
         availableVoices: List<com.example.data.model.DubVoiceOption>,
-        selectedVoiceId: String
+        selectedVoiceId: String,
+        detectedPitchHzMap: Map<String, Float> = emptyMap()
     ): Map<String, com.example.data.model.SpeakerVoiceProfile> {
         val canonicalSpeakers = lines
             .map { canonicalizeSpeakerName(it.speaker) }
@@ -278,7 +294,8 @@ object DubTimelineMath {
                     distinctSpeakers = canonicalSpeakers,
                     basePitch = basePitch,
                     availableVoices = availableVoices,
-                    selectedVoiceId = selectedVoiceId
+                    selectedVoiceId = selectedVoiceId,
+                    detectedPitchHz = detectedPitchHzMap[speaker] ?: 0f
                 )
             }
         }
@@ -289,7 +306,7 @@ object DubTimelineMath {
         current: com.example.data.model.SpeakerVoiceProfile,
         availableVoices: List<com.example.data.model.DubVoiceOption>
     ): com.example.data.model.SpeakerVoiceProfile {
-        val pitchSteps = listOf(0.85f, 0.92f, 1.00f, 1.10f, 1.18f)
+        val pitchSteps = listOf(0.90f, 0.95f, 1.00f, 1.06f, 1.12f)
         val closestIdx = pitchSteps.indices.minByOrNull { kotlin.math.abs(pitchSteps[it] - current.pitchMultiplier) } ?: 2
         val nextPitch = pitchSteps[(closestIdx + 1) % pitchSteps.size]
 
@@ -300,10 +317,11 @@ object DubTimelineMath {
         } else {
             current.androidVoiceId
         }
+        val hzNote = if (current.detectedPitchHz > 0f) " · ~${current.detectedPitchHz.toInt()}Hz" else ""
         return current.copy(
             pitchMultiplier = nextPitch,
             androidVoiceId = nextVoiceId,
-            presetLabel = "${describePitchPreset(nextPitch)} (${String.format(Locale.US, "%.2fx", nextPitch)})"
+            presetLabel = "${describePitchPreset(nextPitch)} (${String.format(Locale.US, "%.2fx", nextPitch)}$hzNote)"
         )
     }
 

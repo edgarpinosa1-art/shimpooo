@@ -161,10 +161,10 @@ class MmsTagalogOnnxEngine(private val context: Context) {
                     feedMap[lenKey] = lenTensor
                 }
 
-                // In VITS: lower noise scales keep character tone/intonation steady across lines
-                val lengthScale = (1.0f / speedFactor.coerceIn(0.75f, 1.45f))
+                // In VITS: balanced noise scales give natural Tagalog inflection while preserving consistent timbre
+                val lengthScale = (1.0f / speedFactor.coerceIn(0.82f, 1.32f))
                 if ("noise_scale" in inputNames) {
-                    val t = OnnxTensor.createTensor(env, FloatBuffer.wrap(floatArrayOf(0.45f)), longArrayOf(1L))
+                    val t = OnnxTensor.createTensor(env, FloatBuffer.wrap(floatArrayOf(0.56f)), longArrayOf(1L))
                         .also { tensors.add(it) }
                     feedMap["noise_scale"] = t
                 }
@@ -174,7 +174,7 @@ class MmsTagalogOnnxEngine(private val context: Context) {
                     feedMap["length_scale"] = t
                 }
                 if ("noise_scale_w" in inputNames) {
-                    val t = OnnxTensor.createTensor(env, FloatBuffer.wrap(floatArrayOf(0.65f)), longArrayOf(1L))
+                    val t = OnnxTensor.createTensor(env, FloatBuffer.wrap(floatArrayOf(0.78f)), longArrayOf(1L))
                         .also { tensors.add(it) }
                     feedMap["noise_scale_w"] = t
                 }

@@ -125,6 +125,8 @@ dependencies {
   implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
   implementation(libs.onnxruntime.android)
+  implementation(libs.mlkit.translate)
+  implementation(libs.mlkit.language.id)
   // implementation(libs.play.services.location)
   implementation(libs.retrofit)
   testImplementation(libs.androidx.compose.ui.test.junit4)

@@ -147,7 +147,7 @@ class VideoDubberEngine(
 
                 val wavData = WavPcmTools.readWavFile(lineWav)
                 val mono = WavPcmTools.toMono(wavData.samples, wavData.channels)
-                val resampled = WavPcmTools.resampleMonoLinear(mono, wavData.sampleRate, TARGET_SAMPLE_RATE)
+                val resampled = WavPcmTools.resampleMonoCubic(mono, wavData.sampleRate, TARGET_SAMPLE_RATE)
                 val trimmed = WavPcmTools.trimDigitalSilence(resampled, TARGET_SAMPLE_RATE)
 
                 if (trimmed.isNotEmpty()) {
@@ -163,13 +163,18 @@ class VideoDubberEngine(
                         targetWindowMs = maxAllowedWindowMs
                     )
 
-                    // Single-pass WSOLA + resample so locked character pitch & voice timbre stay 100% consistent
+                    // Single-pass WSOLA + cubic resample so locked character pitch & voice timbre stay 100% consistent
                     val mmsPitchToApply = if (voiceEngine == DubVoiceEngine.MMS_ONNX_TAGALOG) targetPitch else 1.0f
                     val timeFitted = WavPcmTools.timeAndPitchScaleMono(
                         samples = trimmed,
                         sampleRate = TARGET_SAMPLE_RATE,
                         tempoSpeedFactor = tempoRatio,
                         pitchFactor = mmsPitchToApply
+                    )
+                    val mastered = WavPcmTools.masterDubVoiceClip(
+                        samples = timeFitted,
+                        sampleRate = TARGET_SAMPLE_RATE,
+                        applyDeBuzzFilter = (voiceEngine == DubVoiceEngine.MMS_ONNX_TAGALOG)
                     )
 
                     val startSample = ((line.startMs * TARGET_SAMPLE_RATE) / 1000L)
@@ -178,10 +183,10 @@ class VideoDubberEngine(
                     val maxSamplesBeforeNext = ((maxAllowedWindowMs * TARGET_SAMPLE_RATE) / 1000L)
                         .toInt()
                         .coerceAtLeast(1)
-                    val clipped = if (timeFitted.size > maxSamplesBeforeNext) {
-                        timeFitted.copyOfRange(0, maxSamplesBeforeNext)
+                    val clipped = if (mastered.size > maxSamplesBeforeNext) {
+                        mastered.copyOfRange(0, maxSamplesBeforeNext)
                     } else {
-                        timeFitted
+                        mastered
                     }
 
                     // Persist fitted 44.1kHz mono WAV to keep long-form heap usage tiny (<10MB)
@@ -196,17 +201,23 @@ class VideoDubberEngine(
                 }
             }
 
-            onStageUpdate("Streaming audio ducking & AAC encode...", 0.66f)
+            val stripLabel = if (duckingMode.stripCenterVocals) {
+                "Stripping original vocals & keeping BGM..."
+            } else {
+                "Streaming audio ducking & AAC encode..."
+            }
+            onStageUpdate(stripLabel, 0.66f)
             streamMixAndEncodeToM4a(
                 sourceVideo = tempInputVideo,
                 includeOriginalAudio = duckingMode != DubAudioDuckingMode.MUTE_ORIGINAL,
+                stripCenterVocals = duckingMode.stripCenterVocals,
                 totalMonoSamples = totalMonoSamples,
                 timedWavClips = timedWavClips,
                 backgroundGainDuringSpeech = duckingMode.backgroundGainDuringSpeech,
                 outputM4a = tempAacAudio,
                 onBlockProgress = { blockFrac ->
                     onStageUpdate(
-                        "Mixing & encoding long-form audio (${(blockFrac * 100).toInt()}%)...",
+                        "Mixing clean Filipino dub + BGM (${(blockFrac * 100).toInt()}%)...",
                         0.66f + (0.24f * blockFrac)
                     )
                 }
@@ -381,6 +392,7 @@ class VideoDubberEngine(
     private fun streamMixAndEncodeToM4a(
         sourceVideo: File,
         includeOriginalAudio: Boolean,
+        stripCenterVocals: Boolean,
         totalMonoSamples: Int,
         timedWavClips: List<TimedWavClip>,
         backgroundGainDuringSpeech: Float,
@@ -391,7 +403,7 @@ class VideoDubberEngine(
 
         val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, TARGET_SAMPLE_RATE, 2).apply {
             setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-            setInteger(MediaFormat.KEY_BIT_RATE, 128_000)
+            setInteger(MediaFormat.KEY_BIT_RATE, 160_000)
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16_384)
         }
 
@@ -405,6 +417,7 @@ class VideoDubberEngine(
 
         val reader = if (includeOriginalAudio) StreamingOriginalAudioReader(sourceVideo) else null
         val duckingState = WavPcmTools.DuckingFilterState(1.0f)
+        val vocalStripState = WavPcmTools.VocalStripFilterState()
         val bufferInfo = MediaCodec.BufferInfo()
         var encodedFramesTotal = 0L
 
@@ -492,7 +505,9 @@ class VideoDubberEngine(
                     sampleRate = TARGET_SAMPLE_RATE,
                     overlappingClips = overlappingClips,
                     backgroundGainDuringSpeech = backgroundGainDuringSpeech,
-                    duckingState = duckingState
+                    duckingState = duckingState,
+                    stripCenterVocals = stripCenterVocals,
+                    vocalStripState = vocalStripState
                 )
                 feedStereoPcmBlock(mixedBlock)
 
@@ -585,9 +600,9 @@ class VideoDubberEngine(
                 left
             }
 
-            val resampledL = WavPcmTools.resampleMonoLinear(left, srcRate, TARGET_SAMPLE_RATE)
+            val resampledL = WavPcmTools.resampleMonoCubic(left, srcRate, TARGET_SAMPLE_RATE)
             val resampledR = if (srcChannels >= 2) {
-                WavPcmTools.resampleMonoLinear(right, srcRate, TARGET_SAMPLE_RATE)
+                WavPcmTools.resampleMonoCubic(right, srcRate, TARGET_SAMPLE_RATE)
             } else {
                 resampledL
             }

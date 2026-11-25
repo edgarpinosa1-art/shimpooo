@@ -265,9 +265,11 @@ fun ReelForgeApp(
         }
     }
 
-    val isDubbingBusy = dubberState.scriptState is DubScriptUiState.Generating ||
+    val isDubbingBusy = dubberState.isAutoPipelineRunning ||
+        dubberState.scriptState is DubScriptUiState.Generating ||
         dubberState.renderState is DubRenderUiState.Rendering ||
-        dubberState.mmsModelStatus == com.example.data.model.MmsModelStatus.DOWNLOADING
+        dubberState.mmsModelStatus == com.example.data.model.MmsModelStatus.DOWNLOADING ||
+        dubberState.whisperModelStatus == com.example.data.model.MmsModelStatus.DOWNLOADING
 
     BackHandler(enabled = currentRoute == ROUTE_DOWNLOADER && isDubbingBusy) {
         showMessage("Tuloy-tuloy sa background ang dubbing — makikita ang progress sa notification bar.")
@@ -387,7 +389,7 @@ fun ReelForgeApp(
                                 navigateToTab(ROUTE_TRANSCRIPT)
                             },
                             onSendClipToDubber = { localPath, contentUri ->
-                                viewModel.loadDownloadedClipIntoStudio(localPath, contentUri)
+                                viewModel.loadDownloadedClipIntoStudio(localPath, contentUri, autoStartDubIfEnabled = true)
                                 navigateToTab(ROUTE_DUBBER)
                             },
                             onOpenKeySheet = {
@@ -434,8 +436,20 @@ fun ReelForgeApp(
                             selectedVideo = selectedVideo,
                             dubberState = dubberState,
                             downloadedClips = downloadedClips,
-                            onVideoPicked = viewModel::onLocalVideoSelected,
-                            onSelectDownloadedClip = viewModel::loadDownloadedClipIntoStudio,
+                            onVideoPicked = { uri ->
+                                viewModel.onLocalVideoSelected(uri, autoStartDubIfEnabled = true)
+                            },
+                            onSelectDownloadedClip = { localPath, contentUri ->
+                                viewModel.loadDownloadedClipIntoStudio(localPath, contentUri, autoStartDubIfEnabled = true)
+                            },
+                            onAutoDubAndRender = {
+                                viewModel.autoDubAndRenderFilipinoVideo(
+                                    onNeedApiKey = {
+                                        viewModel.resetKeyCheckState()
+                                        showApiKeySheet = true
+                                    }
+                                )
+                            },
                             onSelectSourceLanguage = viewModel::selectDubSourceLanguage,
                             onSelectVoiceEngine = viewModel::selectDubVoiceEngine,
                             onSelectDuckingMode = viewModel::selectDubDuckingMode,
@@ -446,6 +460,11 @@ fun ReelForgeApp(
                             onCycleCharacterVoice = viewModel::cycleCharacterVoice,
                             onDownloadMmsModel = viewModel::downloadMmsTagalogModel,
                             onDeleteMmsModel = viewModel::deleteMmsTagalogModel,
+                            onDownloadWhisperModel = viewModel::downloadWhisperBaseModel,
+                            onDeleteWhisperModel = viewModel::deleteWhisperBaseModel,
+                            onSelectWhisperTier = viewModel::selectWhisperBrainTier,
+                            onTogglePreferOfflineWhisper = viewModel::togglePreferOfflineWhisperBrain,
+                            onToggleAutoStartOnDrop = viewModel::toggleAutoStartOnVideoDrop,
                             onGenerateDubScript = viewModel::generateFilipinoDubScript,
                             onImportOfflineScript = { raw ->
                                 viewModel.importOfflineDubScript(raw, showMessage)

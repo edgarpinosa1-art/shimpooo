@@ -5,15 +5,45 @@ enum class DubVoiceEngine(
     val badge: String,
     val description: String
 ) {
+    ANDROID_FIL_PH(
+        label = "Filipino Neural HD (Built-in · Multi-Voice)",
+        badge = "RECOMMENDED · ZERO WAIT",
+        description = "Uses your phone's HD Neural Filipino voices with studio EQ mastering + natural multi-speaker voices (₱0, no big download)."
+    ),
     MMS_ONNX_TAGALOG(
         label = "Open-Source MMS-TTS (Tagalog ONNX)",
         badge = "OPEN SOURCE · OFFLINE ONNX",
-        description = "Meta facebook/mms-tts-tgl VITS running locally via ONNX Runtime (₱0, 100% offline after 1-time ~62MB model download)."
+        description = "Meta facebook/mms-tts-tgl VITS running locally via ONNX Runtime with broadcast mastering (₱0, 100% offline after ~62MB download)."
+    )
+}
+
+enum class WhisperBrainTier(
+    val label: String,
+    val shortBadge: String,
+    val repoId: String,
+    val approxSizeLabel: String,
+    val folderName: String
+) {
+    LARGE_V3_TURBO(
+        label = "Whisper Large-v3-Turbo (Latest & Strongest)",
+        shortBadge = "LATEST · ~1.0 GB",
+        repoId = "csukuangfj/sherpa-onnx-whisper-turbo",
+        approxSizeLabel = "~1.0 GB",
+        folderName = "whisper-turbo-onnx"
     ),
-    ANDROID_FIL_PH(
-        label = "Android Neural Filipino (fil-PH)",
-        badge = "BUILT-IN · ZERO DOWNLOAD",
-        description = "Device Speech Services Filipino voice (supports Taglish, multiple voices, & zero extra storage)."
+    SMALL(
+        label = "Whisper Small (High Accuracy)",
+        shortBadge = "BALANCED · ~374 MB",
+        repoId = "csukuangfj/sherpa-onnx-whisper-small",
+        approxSizeLabel = "~374 MB",
+        folderName = "whisper-small-onnx"
+    ),
+    BASE(
+        label = "Whisper Base (Fast Lightweight)",
+        shortBadge = "LIGHT · ~105 MB",
+        repoId = "csukuangfj/sherpa-onnx-whisper-base",
+        approxSizeLabel = "~105 MB",
+        folderName = "whisper-base-onnx"
     )
 }
 
@@ -29,11 +59,24 @@ enum class DubSourceLanguage(
 
 enum class DubAudioDuckingMode(
     val label: String,
-    val backgroundGainDuringSpeech: Float
+    val backgroundGainDuringSpeech: Float,
+    val stripCenterVocals: Boolean = false
 ) {
-    SMART_DUCK_20("Smart Duck (20% BGM/SFX)", 0.20f),
-    LIGHT_DUCK_10("Deep Duck (10% BGM/SFX)", 0.10f),
-    MUTE_ORIGINAL("Pure Voiceover (0% Orig)", 0.0f)
+    STRIP_VOCALS_KEEP_BGM(
+        label = "Vocal Strip (No Orig Voice · Keep BGM)",
+        backgroundGainDuringSpeech = 0.03f,
+        stripCenterVocals = true
+    ),
+    SMART_DUCK_20(
+        label = "Deep Duck (8% Orig Audio)",
+        backgroundGainDuringSpeech = 0.08f,
+        stripCenterVocals = false
+    ),
+    MUTE_ORIGINAL(
+        label = "Pure Voiceover (0% Orig)",
+        backgroundGainDuringSpeech = 0.0f,
+        stripCenterVocals = false
+    )
 }
 
 data class DubLineItem(
@@ -50,7 +93,9 @@ data class DubLineItem(
 data class DubVoiceOption(
     val id: String,
     val label: String,
-    val localeTag: String
+    val localeTag: String,
+    val isFemaleHint: Boolean? = null,
+    val isOfflineHd: Boolean = true
 )
 
 enum class MmsModelStatus {
@@ -75,5 +120,7 @@ data class SpeakerVoiceProfile(
     val pitchMultiplier: Float,
     val androidVoiceId: String,
     val lockedIndex: Int = 0,
-    val presetLabel: String = "Natural (1.00x)"
+    val presetLabel: String = "Natural (1.00x)",
+    val detectedPitchHz: Float = 0f,
+    val genderTag: String = ""
 )

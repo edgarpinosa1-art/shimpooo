@@ -14,13 +14,18 @@ import com.example.data.network.PinterestExtractorHelper
 import com.example.data.network.PromptBlueprintSerializer
 import com.example.data.network.TranscriptSerializer
 import com.example.data.network.VideoExtractorRepository
+import com.example.data.dubbing.AudioSpeechVadSegmenter
 import com.example.data.dubbing.DubTimelineMath
 import com.example.data.dubbing.MmsTagalogOnnxEngine
+import com.example.data.dubbing.SpeakerAcousticClustering
 import com.example.data.dubbing.TimedPcmClip
 import com.example.data.dubbing.WavPcmTools
+import com.example.data.dubbing.WhisperMelSpectrogram
+import com.example.data.dubbing.WhisperOnnxEngine
 import com.example.data.model.AiProvider
 import com.example.data.model.ModelCapabilityTag
 import com.example.data.model.ThirdPartyModelCatalog
+import com.example.data.model.WhisperBrainTier
 import com.example.data.network.FastDownloadPlanner
 import com.example.data.network.ThirdPartyTranscriptHelper
 import com.example.data.network.YouTubeExtractorHelper
@@ -403,10 +408,11 @@ class ReelForgeCoreTest {
         assertEquals(4500L, scriptLines[1].startMs)
         assertEquals(8000L, scriptLines[1].endMs)
 
-        // Tempo clamping & deadband checks
+        // Tempo clamping & deadband checks (no robotic slowdown, <=12% deadband, 1.28x natural ceiling)
         assertEquals(1.0f, DubTimelineMath.computeTempoRatioForWindow(2000L, 2000L), 0.001f)
-        assertEquals(1.45f, DubTimelineMath.computeTempoRatioForWindow(5000L, 2000L), 0.001f)
-        assertEquals(0.85f, DubTimelineMath.computeTempoRatioForWindow(1000L, 4000L), 0.001f)
+        assertEquals(1.0f, DubTimelineMath.computeTempoRatioForWindow(2200L, 2000L), 0.001f)
+        assertEquals(1.28f, DubTimelineMath.computeTempoRatioForWindow(5000L, 2000L), 0.001f)
+        assertEquals(1.0f, DubTimelineMath.computeTempoRatioForWindow(1000L, 4000L), 0.001f)
     }
 
     @Test
@@ -753,6 +759,140 @@ class ReelForgeCoreTest {
         val smallChunks = FastDownloadPlanner.planChunks(400L * 1024L, maxThreads = 6)
         assertEquals(1, smallChunks.size)
     }
+
+    @Test
+    fun centerVocalStrippingRemovesCenterDialogueWhilePreservingStereoBgm() {
+        val sampleRate = 16000
+        val totalSamples = sampleRate // 1 second
+        // Create stereo mix: center vocal (L == R at 1000 Hz) + stereo BGM side (L = +sine, R = -sine at 330 Hz)
+        val stereoInput = ShortArray(totalSamples * 2)
+        for (i in 0 until totalSamples) {
+            val centerVocal = sin(2.0 * Math.PI * 1000.0 * i / sampleRate) * 12000.0
+            val sideBgm = sin(2.0 * Math.PI * 330.0 * i / sampleRate) * 9000.0
+            stereoInput[i * 2] = (centerVocal + sideBgm).toInt().toShort()
+            stereoInput[i * 2 + 1] = (centerVocal - sideBgm).toInt().toShort()
+        }
+
+        // Silent dub clip covering whole second so speechBlend ~ 1.0 inside middle
+        val silentDub = TimedPcmClip(0, totalSamples, ShortArray(totalSamples) { 0 })
+        val stripped = WavPcmTools.mixDubClipsIntoStereoTimeline(
+            originalStereoPcm = stereoInput,
+            totalDurationSamplesPerChannel = totalSamples,
+            sampleRate = sampleRate,
+            dubClips = listOf(silentDub),
+            backgroundGainDuringSpeech = 0.03f,
+            stripCenterVocals = true
+        )
+
+        // Measure mid energy vs side energy in steady-state second half (samples 8000..15000)
+        var midSq = 0.0
+        var sideSq = 0.0
+        for (i in 8000 until 15000) {
+            val l = stripped[i * 2].toDouble()
+            val r = stripped[i * 2 + 1].toDouble()
+            val mid = 0.5 * (l + r)
+            val side = 0.5 * (l - r)
+            midSq += mid * mid
+            sideSq += side * side
+        }
+        val midRms = kotlin.math.sqrt(midSq / 7000.0)
+        val sideRms = kotlin.math.sqrt(sideSq / 7000.0)
+
+        // Center vocal (12000 * 0.707 ~ 8485 RMS originally) is heavily stripped (< 900 RMS)
+        assertTrue("Expected center vocal stripped (<900), got $midRms", midRms < 900.0)
+        // Stereo BGM side channel remains clearly audible (> 3000 RMS)
+        assertTrue("Expected stereo BGM preserved (>3000), got $sideRms", sideRms > 3000.0)
+    }
+
+    @Test
+    fun mp4SpeakerClusteringSeparatesMaleAndFemaleCharactersFromUnlabelledLines() {
+        val sampleRate = 16000
+        val maleAudio = ShortArray(sampleRate / 2) { i ->
+            (sin(2.0 * Math.PI * 120.0 * i / sampleRate) * 14000.0).toInt().toShort()
+        }
+        val femaleAudio = ShortArray(sampleRate / 2) { i ->
+            (sin(2.0 * Math.PI * 225.0 * i / sampleRate) * 14000.0).toInt().toShort()
+        }
+
+        val maleHz = SpeakerAcousticClustering.estimatePitchHz(maleAudio, sampleRate)
+        val femaleHz = SpeakerAcousticClustering.estimatePitchHz(femaleAudio, sampleRate)
+        assertNotNull(maleHz)
+        assertNotNull(femaleHz)
+        assertTrue("Expected ~120 Hz male pitch, got $maleHz", maleHz!! in 105f..135f)
+        assertTrue("Expected ~225 Hz female pitch, got $femaleHz", femaleHz!! in 205f..245f)
+
+        val unlabelledLines = listOf(
+            DubLineItem(1L, 0L, 2000L, "Speaker 1", "Hey!", "Hoy!"),
+            DubLineItem(2L, 2200L, 4500L, "Speaker 1", "What's up?", "Anong balita?"),
+            DubLineItem(3L, 4800L, 7000L, "Speaker 1", "Nothing much.", "Wala naman.")
+        )
+        val analysis = SpeakerAcousticClustering.refineSpeakersFromAudio(
+            lines = unlabelledLines,
+            linePitches = listOf(maleHz, femaleHz, maleHz)
+        )
+
+        assertEquals(3, analysis.refinedLines.size)
+        assertEquals(analysis.refinedLines[0].speaker, analysis.refinedLines[2].speaker)
+        assertFalse(analysis.refinedLines[0].speaker == analysis.refinedLines[1].speaker)
+        assertTrue(analysis.refinedLines[0].speaker.contains("Male"))
+        assertTrue(analysis.refinedLines[1].speaker.contains("Female"))
+    }
+
+    @Test
+    fun cubicResamplingAndBroadcastMasteringProduceCleanBoundedPcm() {
+        val srcRate = 16000
+        val dstRate = 44100
+        val quietTone = ShortArray(srcRate / 2) { i ->
+            (sin(2.0 * Math.PI * 250.0 * i / srcRate) * 2400.0).toInt().toShort()
+        }
+        val mastered = WavPcmTools.masterDubVoiceClip(quietTone, srcRate, applyDeBuzzFilter = true)
+        assertEquals(quietTone.size, mastered.size)
+        val inputPeak = quietTone.maxOf { abs(it.toInt()) }
+        val masteredPeak = mastered.maxOf { abs(it.toInt()) }
+        assertTrue("Expected mastered gain boost ($masteredPeak > $inputPeak)", masteredPeak > inputPeak)
+
+        val upsampled = WavPcmTools.resampleMonoCubic(mastered, srcRate, dstRate)
+        val expectedLen = ((mastered.size.toLong() * dstRate.toLong()) / srcRate.toLong()).toInt()
+        assertEquals(expectedLen, upsampled.size)
+        assertTrue(upsampled.any { it != 0.toShort() })
+    }
+
+    @Test
+    fun whisperMelSpectrogramVadAndTokensParserProduceExactShapes() {
+        val sampleRate = 16000
+        // 5-second clip: speech [0.5s..1.8s], pause [1.8s..3.0s], speech [3.0s..4.5s]
+        val pcm = ShortArray(sampleRate * 5) { idx ->
+            val inFirst = idx in (sampleRate / 2)..(sampleRate * 18 / 10)
+            val inSecond = idx in (sampleRate * 3)..(sampleRate * 45 / 10)
+            if (inFirst || inSecond) {
+                (sin(2.0 * Math.PI * 240.0 * idx / sampleRate) * 11000.0).toInt().toShort()
+            } else 0
+        }
+
+        val vadSegments = AudioSpeechVadSegmenter.segmentSpeechWindows(pcm, sampleRate, baseOffsetMs = 0L)
+        assertEquals(2, vadSegments.size)
+        assertTrue(vadSegments[0].startMs in 350L..650L)
+        assertTrue(vadSegments[1].startMs in 2850L..3150L)
+
+        val mel = WhisperMelSpectrogram.computeLogMel(vadSegments[0].mono16k, nMels = 80)
+        assertEquals(80 * 3000, mel.size)
+        assertTrue(mel.all { !it.isNaN() && !it.isInfinite() && it in -2.5f..2.5f })
+
+        val mel128 = WhisperMelSpectrogram.computeLogMel(vadSegments[0].mono16k, nMels = 128)
+        assertEquals(128 * 3000, mel128.size)
+        assertTrue(mel128.all { !it.isNaN() && !it.isInfinite() && it in -2.5f..2.5f })
+
+        assertEquals("csukuangfj/sherpa-onnx-whisper-turbo", WhisperBrainTier.LARGE_V3_TURBO.repoId)
+        assertEquals(3, WhisperBrainTier.entries.map { it.folderName }.distinct().size)
+
+        // "SGVsbG8=" -> "Hello", "IHdvcmxk" -> " world"
+        val tokensTxt = "SGVsbG8= 100\nIHdvcmxk 101\n"
+        val map = WhisperOnnxEngine.parseBase64TokensText(tokensTxt)
+        assertEquals("Hello", map[100]?.toString(Charsets.UTF_8))
+        assertEquals(" world", map[101]?.toString(Charsets.UTF_8))
+    }
 }
+
+
 
 

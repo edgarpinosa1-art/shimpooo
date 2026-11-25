@@ -143,7 +143,8 @@ fun StudioTopHeader(
     hasApiKey: Boolean,
     onOpenKeySheet: () -> Unit,
     modifier: Modifier = Modifier,
-    providerLabel: String = "Gemini"
+    providerLabel: String = "Gemini",
+    offlineOpenSourceLabel: String? = null
 ) {
     Box(
         modifier = modifier
@@ -199,34 +200,61 @@ fun StudioTopHeader(
                     )
                 }
 
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = if (hasApiKey) StudioEmerald.copy(alpha = 0.16f) else StudioCoral.copy(alpha = 0.18f),
-                    border = BorderStroke(
-                        1.dp,
-                        if (hasApiKey) StudioEmerald.copy(alpha = 0.6f) else StudioCoral.copy(alpha = 0.7f)
-                    ),
-                    modifier = Modifier
-                        .testTag("header_api_key_chip")
-                        .clip(RoundedCornerShape(50))
-                        .clickable { onOpenKeySheet() }
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                if (offlineOpenSourceLabel != null) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = StudioEmerald.copy(alpha = 0.16f),
+                        border = BorderStroke(1.dp, StudioEmerald.copy(alpha = 0.6f)),
+                        modifier = Modifier.testTag("header_open_source_chip")
                     ) {
-                        Icon(
-                            imageVector = if (hasApiKey) Icons.Filled.CheckCircle else Icons.Filled.Key,
-                            contentDescription = "Manage AI API key",
-                            tint = if (hasApiKey) StudioEmerald else StudioCoral,
-                            modifier = Modifier.size(15.dp)
-                        )
-                        Text(
-                            text = if (hasApiKey) "$providerLabel Ready" else "Set AI Key",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (hasApiKey) StudioEmerald else StudioCoral
-                        )
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.CheckCircle,
+                                contentDescription = "Open-source offline ready",
+                                tint = StudioEmerald,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Text(
+                                text = offlineOpenSourceLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = StudioEmerald
+                            )
+                        }
+                    }
+                } else {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = if (hasApiKey) StudioEmerald.copy(alpha = 0.16f) else StudioCoral.copy(alpha = 0.18f),
+                        border = BorderStroke(
+                            1.dp,
+                            if (hasApiKey) StudioEmerald.copy(alpha = 0.6f) else StudioCoral.copy(alpha = 0.7f)
+                        ),
+                        modifier = Modifier
+                            .testTag("header_api_key_chip")
+                            .clip(RoundedCornerShape(50))
+                            .clickable { onOpenKeySheet() }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (hasApiKey) Icons.Filled.CheckCircle else Icons.Filled.Key,
+                                contentDescription = "Manage AI API key",
+                                tint = if (hasApiKey) StudioEmerald else StudioCoral,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Text(
+                                text = if (hasApiKey) "$providerLabel Ready" else "Set AI Key",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (hasApiKey) StudioEmerald else StudioCoral
+                            )
+                        }
                     }
                 }
             }

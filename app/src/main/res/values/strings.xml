@@ -24,9 +24,10 @@
     <string name="btn_generate_transcript">Generate Complete Transcript</string>
 
     <string name="dubber_headline">Filipino AI Video Dubber</string>
-    <string name="dubber_subtitle">Translate English or Japanese videos into lip-timed Filipino dubs with free on-device voices &amp; BGM ducking.</string>
-    <string name="btn_generate_dub_script">Auto-Translate &amp; Sync Script (EN/JA → FIL)</string>
-    <string name="btn_render_dubbed_video">Render Filipino Dubbed MP4</string>
+    <string name="dubber_subtitle">1-Tap auto-translate to Filipino, auto-detect characters inside the MP4, strip original voice &amp; render HD MP4.</string>
+    <string name="btn_auto_dub_now">Auto-Translate, Detect Cast &amp; Dub MP4</string>
+    <string name="btn_generate_dub_script">Only Generate Filipino Script (Optional)</string>
+    <string name="btn_render_dubbed_video">Re-Render Filipino Dubbed MP4</string>
     <string name="dub_notif_channel_name">Filipino Video Dubbing</string>
     <string name="dub_notif_channel_desc">Shows live progress while translating and rendering Filipino dubbed videos in the background.</string>
     <string name="dub_background_safe_note">Tuloy-tuloy sa background kahit mag-Back o lumabas ng app.</string>
